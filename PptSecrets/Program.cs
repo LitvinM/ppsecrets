@@ -83,18 +83,30 @@ using (var scope = app.Services.CreateScope())
 
 app.UseRequestLocalization(localizationOptions);
 
+var imagesPath = Path.Combine(builder.Environment.ContentRootPath, "images");
+var presPath = Path.Combine(builder.Environment.ContentRootPath, "presentations");
+
+if (!Directory.Exists(imagesPath))
+{
+    Directory.CreateDirectory(imagesPath);
+    Console.WriteLine($"Directory created: {imagesPath}");
+}
+if (!Directory.Exists(presPath))
+{
+    Directory.CreateDirectory(presPath);
+    Console.WriteLine($"Directory created: {presPath}");
+}
+
 app.UseStaticFiles(new StaticFileOptions
 {
-    FileProvider = new PhysicalFileProvider(
-        Path.Combine(builder.Environment.ContentRootPath, "images")),
+    FileProvider = new PhysicalFileProvider(imagesPath),
     RequestPath = "/images"
 });
 
 app.UseStaticFiles(new StaticFileOptions
 {
-    FileProvider = new PhysicalFileProvider(
-        Path.Combine(builder.Environment.ContentRootPath, "presentations")),
-    RequestPath = "/presentations"
+    FileProvider = new PhysicalFileProvider(presPath),
+    RequestPath = "/images"
 });
 
 app.UseMiddleware<PptSecrets.ExceptionHandler.ExceptionHandlerMiddleware>();
