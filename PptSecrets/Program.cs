@@ -21,10 +21,7 @@ var localizationOptions = new RequestLocalizationOptions()
 
 builder.Services.AddDbContext<PptDbContext>(options =>
 {
-    options.UseMySql(
-        connectionString,
-        ServerVersion.AutoDetect(connectionString)
-    );
+    options.UseNpgsql(connectionString);
 });
 
 builder.Services.AddScoped<IUserService, UserService>();

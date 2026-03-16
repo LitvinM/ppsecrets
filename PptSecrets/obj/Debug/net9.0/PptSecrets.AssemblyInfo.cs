@@ -13,7 +13,7 @@ using System.Reflection;
 [assembly: System.Reflection.AssemblyCompanyAttribute("PptSecrets")]
 [assembly: System.Reflection.AssemblyConfigurationAttribute("Debug")]
 [assembly: System.Reflection.AssemblyFileVersionAttribute("1.0.0.0")]
-[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0")]
+[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+56973136a4f40b4f52d7ce0e37bf57943b0153f9")]
 [assembly: System.Reflection.AssemblyProductAttribute("PptSecrets")]
 [assembly: System.Reflection.AssemblyTitleAttribute("PptSecrets")]
 [assembly: System.Reflection.AssemblyVersionAttribute("1.0.0.0")]
