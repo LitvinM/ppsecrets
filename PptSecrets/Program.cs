@@ -13,16 +13,36 @@ var builder = WebApplication.CreateBuilder(args);
 
 var connectionString = builder.Configuration.GetConnectionString("DefaultConnection");
 
+// ПРОВЕРКА: Если строка пустая или это URL от Render (начинается с postgres://)
+if (string.IsNullOrEmpty(connectionString))
+{
+    // Попробуем взять системную переменную DATABASE_URL (Render часто ее дает)
+    connectionString = Environment.GetEnvironmentVariable("DATABASE_URL");
+}
+
+if (!string.IsNullOrEmpty(connectionString) && connectionString.StartsWith("postgres://"))
+{
+    // Парсим URL формат в формат Npgsql
+    var databaseUri = new Uri(connectionString);
+    var userInfo = databaseUri.UserInfo.Split(':');
+
+    connectionString = $"Host={databaseUri.Host};" +
+                       $"Port={databaseUri.Port};" +
+                       $"Database={databaseUri.LocalPath.TrimStart('/')};" +
+                       $"Username={userInfo[0]};" +
+                       $"Password={userInfo[1]};" +
+                       $"SSL Mode=Require;Trust Server Certificate=true;";
+}
+
+builder.Services.AddDbContext<PptDbContext>(options =>
+    options.UseNpgsql(connectionString));
+
+
 var supportedCultures = new[] { "en-US" };
 var localizationOptions = new RequestLocalizationOptions()
     .SetDefaultCulture(supportedCultures[0])
     .AddSupportedCultures(supportedCultures)
     .AddSupportedUICultures(supportedCultures);
-
-builder.Services.AddDbContext<PptDbContext>(options =>
-{
-    options.UseNpgsql(connectionString);
-});
 
 builder.Services.AddScoped<IUserService, UserService>();
 builder.Services.AddScoped<IPptService, PptService>();
