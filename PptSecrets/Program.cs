@@ -11,32 +11,32 @@ using PptSecrets.DataAccess.Repository;
 
 var builder = WebApplication.CreateBuilder(args);
 
-var connectionString = builder.Configuration.GetConnectionString("DefaultConnection");
+var connectionString = builder.Configuration.GetConnectionString("DefaultConnection") 
+                       ?? Environment.GetEnvironmentVariable("ConnectionStrings__DefaultConnection")
+                       ?? Environment.GetEnvironmentVariable("DATABASE_URL");
 
-// ПРОВЕРКА: Если строка пустая или это URL от Render (начинается с postgres://)
-if (string.IsNullOrEmpty(connectionString))
+if (!string.IsNullOrEmpty(connectionString) && 
+    (connectionString.StartsWith("postgres://") || connectionString.StartsWith("postgresql://")))
 {
-    // Попробуем взять системную переменную DATABASE_URL (Render часто ее дает)
-    connectionString = Environment.GetEnvironmentVariable("DATABASE_URL");
-}
-
-if (!string.IsNullOrEmpty(connectionString) && connectionString.StartsWith("postgres://"))
-{
-    // Парсим URL формат в формат Npgsql
-    var databaseUri = new Uri(connectionString);
+    // Приводим к единому стандарту для Uri
+    var uriString = connectionString.Replace("postgresql://", "postgres://");
+    var databaseUri = new Uri(uriString);
     var userInfo = databaseUri.UserInfo.Split(':');
 
-    connectionString = $"Host={databaseUri.Host};" +
-                       $"Port={databaseUri.Port};" +
-                       $"Database={databaseUri.LocalPath.TrimStart('/')};" +
-                       $"Username={userInfo[0]};" +
-                       $"Password={userInfo[1]};" +
-                       $"SSL Mode=Require;Trust Server Certificate=true;";
+    // Собираем строку в формате Npgsql
+    // Если порт не указан в URI (databaseUri.Port < 0), ставим стандартный 5432
+    var host = databaseUri.Host;
+    var port = databaseUri.Port > 0 ? databaseUri.Port : 5432;
+    var database = databaseUri.LocalPath.TrimStart('/');
+    var username = userInfo[0];
+    var password = userInfo.Length > 1 ? userInfo[1] : "";
+
+    connectionString = $"Host={host};Port={port};Database={database};Username={username};Password={password};SSL Mode=Require;Trust Server Certificate=true;";
 }
 
+// Теперь Npgsql получит строку в формате: Host=dpg-d6ru...;Port=5432;Database=...
 builder.Services.AddDbContext<PptDbContext>(options =>
     options.UseNpgsql(connectionString));
-
 
 var supportedCultures = new[] { "en-US" };
 var localizationOptions = new RequestLocalizationOptions()
