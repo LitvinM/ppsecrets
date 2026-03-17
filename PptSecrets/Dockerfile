@@ -14,7 +14,14 @@ RUN dotnet build "PptSecrets.csproj" -c Release -o /app/build
 FROM build AS publish
 RUN dotnet publish "PptSecrets.csproj" -c Release -o /app/publish /p:UseAppHost=false
 
-FROM base AS final
+FROM mcr.microsoft.com/dotnet/aspnet:8.0 AS final
 WORKDIR /app
-COPY --from=publish /app/publish .
+COPY --from=build /app/publish .
+
+RUN mkdir -p /app/images
+RUN mkdir -p /app/presentations
+
+ENV ASPNETCORE_HTTP_PORTS=8080
+EXPOSE 8080
+
 ENTRYPOINT ["dotnet", "PptSecrets.dll"]
