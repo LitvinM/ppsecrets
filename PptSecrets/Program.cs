@@ -69,7 +69,7 @@ builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
         };
     });
 
-var ip = builder.Configuration["frontip"];
+var ip =  Environment.GetEnvironmentVariable("Frontip") ?? builder.Configuration["Frontip"];
 
 builder.Services.AddCors(o => o.AddPolicy("FrontendPolicy", b => b.WithOrigins(ip ?? "localhost:3000").AllowAnyMethod().AllowAnyHeader().AllowCredentials()));
 
