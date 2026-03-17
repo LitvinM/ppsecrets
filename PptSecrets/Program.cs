@@ -86,6 +86,8 @@ using (var scope = app.Services.CreateScope())
     db.Database.EnsureCreated();
 }
 
+app.UseCors("FrontendPolicy");
+
 app.UseRequestLocalization(localizationOptions);
 
 var imagesPath = Path.Combine(builder.Environment.ContentRootPath, "images");
@@ -111,7 +113,7 @@ app.UseStaticFiles(new StaticFileOptions
 app.UseStaticFiles(new StaticFileOptions
 {
     FileProvider = new PhysicalFileProvider(presPath),
-    RequestPath = "/images"
+    RequestPath = "/presentations"
 });
 
 app.UseMiddleware<PptSecrets.ExceptionHandler.ExceptionHandlerMiddleware>();
@@ -124,7 +126,6 @@ if (app.Environment.IsDevelopment())
     app.UseSwaggerUI();
 }
 
-app.UseCors("FrontendPolicy");
 app.UseAuthentication();
 app.UseAuthorization();
 app.MapControllers();
