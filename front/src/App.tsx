@@ -11,7 +11,7 @@ import { Cart } from './pages/Cart';
 import { Checkout } from './pages/Checkout';
 import { Admin } from './pages/Admin';
 import { FAQ } from './pages/FAQ';
-import {Success} from "@/src/pages/success.tsx";
+import {Success} from "./pages/Success";
 
 const ProtectedRoute = ({ children, requireAdmin = false }: { children: React.ReactNode, requireAdmin?: boolean }) => {
   const { isAuthenticated, isAdmin } = useAuth();
