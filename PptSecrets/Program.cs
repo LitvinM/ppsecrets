@@ -73,7 +73,7 @@ var ip = builder.Configuration["Frontip"];
 var allowedOrigin = string.IsNullOrEmpty(ip) ? "http://localhost:3000" : ip;
 
 builder.Services.AddCors(o => o.AddPolicy("FrontendPolicy", b => 
-    b.WithOrigins(allowedOrigin)
+    b.SetIsOriginAllowed(origin => true)
         .AllowAnyMethod()
         .AllowAnyHeader()
         .AllowCredentials()));
