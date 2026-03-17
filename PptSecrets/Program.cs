@@ -69,9 +69,14 @@ builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
         };
     });
 
-var ip =  Environment.GetEnvironmentVariable("Frontip") ?? builder.Configuration["Frontip"];
+var ip = builder.Configuration["Frontip"]; 
+var allowedOrigin = string.IsNullOrEmpty(ip) ? "http://localhost:3000" : ip;
 
-builder.Services.AddCors(o => o.AddPolicy("FrontendPolicy", b => b.WithOrigins(ip ?? "localhost:3000").AllowAnyMethod().AllowAnyHeader().AllowCredentials()));
+builder.Services.AddCors(o => o.AddPolicy("FrontendPolicy", b => 
+    b.WithOrigins(allowedOrigin)
+        .AllowAnyMethod()
+        .AllowAnyHeader()
+        .AllowCredentials()));
 
 var app = builder.Build();
 
