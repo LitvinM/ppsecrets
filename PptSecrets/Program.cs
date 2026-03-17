@@ -4,6 +4,7 @@ using System.Text;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.FileProviders;
 using Microsoft.OpenApi;
+using PptSecrets.Core.Entities;
 using PptSecrets.Core.Interfaces;
 using PptSecrets.Core.Services;
 using PptSecrets.DataAccess;
@@ -73,7 +74,7 @@ var ip = builder.Configuration["Frontip"];
 var allowedOrigin = string.IsNullOrEmpty(ip) ? "http://localhost:3000" : ip;
 
 builder.Services.AddCors(o => o.AddPolicy("FrontendPolicy", b => 
-    b.SetIsOriginAllowed(origin => true)
+    b.WithOrigins(allowedOrigin)
         .AllowAnyMethod()
         .AllowAnyHeader()
         .AllowCredentials()));
@@ -84,6 +85,17 @@ using (var scope = app.Services.CreateScope())
 {
     var db = scope.ServiceProvider.GetRequiredService<PptDbContext>();
     db.Database.EnsureCreated();
+
+    if (db.Users.Count() < 0)
+    {
+        var user = new User
+        {
+            Email = "15012010d@gmail.com",
+            PasswordHash = UserService.HashPassword("Pass1234!!!"),
+            Role = "Admin"
+        };
+        db.Users.Add(user);
+    }
 }
 
 app.UseCors("FrontendPolicy");
