@@ -86,7 +86,8 @@ using (var scope = app.Services.CreateScope())
     var db = scope.ServiceProvider.GetRequiredService<PptDbContext>();
     db.Database.EnsureCreated();
 
-    if (db.Users.Count() < 0)
+    var uow = scope.ServiceProvider.GetRequiredService<IUnitOfWork>();
+    if (!(await uow.Users.GetAllAsync()).Any())
     {
         var user = new User
         {
@@ -94,7 +95,7 @@ using (var scope = app.Services.CreateScope())
             PasswordHash = UserService.HashPassword("Pass1234!!!"),
             Role = "Admin"
         };
-        db.Users.Add(user);
+        await uow.Users.AddAsync(user);
     }
 }
 
