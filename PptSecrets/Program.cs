@@ -96,6 +96,7 @@ using (var scope = app.Services.CreateScope())
             Role = "Admin"
         };
         await uow.Users.AddAsync(user);
+        await uow.SaveChangesAsync();
     }
 }
 
