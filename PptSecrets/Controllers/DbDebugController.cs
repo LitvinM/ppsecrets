@@ -16,29 +16,4 @@ public class DbDebugController : ControllerBase
         _uow = uow;
     }
 
-    [HttpGet("/users")]
-    public async Task<IActionResult> GetUsers()
-    {
-        return Ok(await _uow.Users.GetAllAsync());
-    }
-    [HttpGet("/ppts")]
-    public async Task<IActionResult> GetPpts()
-    {
-        return Ok(await _uow.Users.GetAllAsync());
-    }
-    [HttpGet("/up")]
-    public async Task<IActionResult> GetUserPpts()
-    {
-        return Ok(await _uow.Users.GetAllAsync());
-    }
-    [HttpGet("/email")]
-    public async Task<IActionResult> GetEmailVerifications()
-    {
-        return Ok(await _uow.Users.GetAllAsync());
-    }
-    [HttpGet("/payments")]
-    public async Task<IActionResult> GetPayments()
-    {
-        return Ok(await _uow.Users.GetAllAsync());
-    }
 }
