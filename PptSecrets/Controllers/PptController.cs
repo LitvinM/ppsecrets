@@ -14,42 +14,13 @@ public class PptController : ControllerBase
 {
     private readonly IPptService _pptService;
     private readonly IUserService _userService;
-    private readonly IUnitOfWork _uow;
 
-    public PptController(IPptService pptService, IUserService userService, IUnitOfWork uow)
+    public PptController(IPptService pptService, IUserService userService)
     {
         _pptService = pptService;
         _userService = userService;
-        _uow = uow;
     }
 
-    
-    [HttpGet("/get-users")]
-    public async Task<IActionResult> GetUsers()
-    {
-        return Ok(await _uow.Users.GetAllAsync());
-    }
-    [HttpGet("/get-ppts")]
-    public async Task<IActionResult> GetPpts()
-    {
-        return Ok(await _uow.Users.GetAllAsync());
-    }
-    [HttpGet("/get-up")]
-    public async Task<IActionResult> GetUserPpts()
-    {
-        return Ok(await _uow.Users.GetAllAsync());
-    }
-    [HttpGet("/get-email")]
-    public async Task<IActionResult> GetEmailVerifications()
-    {
-        return Ok(await _uow.Users.GetAllAsync());
-    }
-    [HttpGet("/get-payments")]
-    public async Task<IActionResult> GetPayments()
-    {
-        return Ok(await _uow.Users.GetAllAsync());
-    }
-    
     [HttpGet]
     public async Task<IActionResult> GetAll()
     {
