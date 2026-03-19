@@ -248,25 +248,46 @@ public class PptService : IPptService
         message.Body = new TextPart("plain") { Text = bodyText };
 
         using var client = new SmtpClient();
-        await client.ConnectAsync(smtpHost, smtpPort, SecureSocketOptions.StartTls);
-        await client.AuthenticateAsync(smtpUser, smtpPass);
+        client.Timeout = 10000;
+        client.ServerCertificateValidationCallback = (s, c, h, e) => true;
         
-        await client.SendAsync(message);
+        try 
+        {
+            await client.ConnectAsync(
+                smtpHost, 
+                smtpPort, 
+                SecureSocketOptions.SslOnConnect 
+            );
+            await client.AuthenticateAsync(smtpUser, smtpPass);
+        
+            await client.SendAsync(message);
 
         
-        if (!string.IsNullOrEmpty(ownerEmail))
-        {
-            var ownerMessage = new MimeMessage();
-            ownerMessage.From.Add(new MailboxAddress("PptSecrets System", smtpUser));
-            ownerMessage.To.Add(new MailboxAddress("Owner", ownerEmail));
-            ownerMessage.Subject = "Новая покупка презентации!";
-            ownerMessage.Body = new TextPart("plain")
+            if (!string.IsNullOrEmpty(ownerEmail))
             {
-                Text = $"Пользователь {userEmail} приобрел \"{ownerPpts}\"\n" +
-                       $"Файл успешно доставлен."
-            };
-            await client.SendAsync(ownerMessage);
+                var ownerMessage = new MimeMessage();
+                ownerMessage.From.Add(new MailboxAddress("PptSecrets System", smtpUser));
+                ownerMessage.To.Add(new MailboxAddress("Owner", ownerEmail));
+                ownerMessage.Subject = "Новая покупка презентации!";
+                ownerMessage.Body = new TextPart("plain")
+                {
+                    Text = $"Пользователь {userEmail} приобрел \"{ownerPpts}\"\n" +
+                           $"Файл успешно доставлен."
+                };
+                await client.SendAsync(ownerMessage);
+            }
         }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"SMTP Error: {ex.Message}");
+            throw;
+        }
+        finally
+        {
+            await client.DisconnectAsync(true);
+        }
+        
+        
 
         await client.DisconnectAsync(true);
     }

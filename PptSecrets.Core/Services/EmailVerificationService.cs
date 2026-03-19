@@ -52,11 +52,27 @@ public class EmailVerificationService : IEmailVerificationService
         }
 
         using var client = new SmtpClient();
+        client.Timeout = 10000;
         client.ServerCertificateValidationCallback = (s, c, h, e) => true;
-        await client.ConnectAsync(_config["Email:SmtpHost"], int.Parse(_config["Email:SmtpPort"]!), SecureSocketOptions.StartTls);
-        await client.AuthenticateAsync(_config["Email:SmtpUser"], _config["Email:SmtpPass"]);
-        await client.SendAsync(message);
-        await client.DisconnectAsync(true);
+        try 
+        {
+            await client.ConnectAsync(
+                _config["Email:SmtpHost"], 
+                int.Parse(_config["Email:SmtpPort"]!), 
+                SecureSocketOptions.SslOnConnect 
+            );
+            await client.AuthenticateAsync(_config["Email:SmtpUser"], _config["Email:SmtpPass"]);
+            await client.SendAsync(message);
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"SMTP Error: {ex.Message}");
+            throw;
+        }
+        finally
+        {
+            await client.DisconnectAsync(true);
+        }
     }
 
     private string GetHtmlTemplate(string title, string code, string footer) => 
