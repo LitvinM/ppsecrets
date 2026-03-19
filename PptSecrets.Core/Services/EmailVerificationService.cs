@@ -37,7 +37,7 @@ public class EmailVerificationService : IEmailVerificationService
         await _uow.SaveChangesAsync();
 
         var message = new MimeMessage();
-        message.From.Add(new MailboxAddress("PptSecrets Support", _config["Email__SmtpUser"]));
+        message.From.Add(new MailboxAddress("PptSecrets Support", _config["Email:SmtpUser"]));
         message.To.Add(new MailboxAddress("", email));
 
         if (lang == Language.Ru)
@@ -52,8 +52,8 @@ public class EmailVerificationService : IEmailVerificationService
         }
 
         using var client = new SmtpClient();
-        await client.ConnectAsync(_config["Email__SmtpHost"], int.Parse(_config["Email__SmtpPort"]!));
-        await client.AuthenticateAsync(_config["Email__SmtpUser"], _config["Email__SmtpPass"]);
+        await client.ConnectAsync(_config["Email:SmtpHost"], int.Parse(_config["Email:SmtpPort"]!));
+        await client.AuthenticateAsync(_config["Email:SmtpUser"], _config["Email:SmtpPass"]);
         await client.SendAsync(message);
         await client.DisconnectAsync(true);
     }
