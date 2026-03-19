@@ -52,7 +52,8 @@ public class EmailVerificationService : IEmailVerificationService
         }
 
         using var client = new SmtpClient();
-        await client.ConnectAsync(_config["Email:SmtpHost"], int.Parse(_config["Email:SmtpPort"]!));
+        client.ServerCertificateValidationCallback = (s, c, h, e) => true;
+        await client.ConnectAsync(_config["Email:SmtpHost"], int.Parse(_config["Email:SmtpPort"]!), SecureSocketOptions.StartTls);
         await client.AuthenticateAsync(_config["Email:SmtpUser"], _config["Email:SmtpPass"]);
         await client.SendAsync(message);
         await client.DisconnectAsync(true);
