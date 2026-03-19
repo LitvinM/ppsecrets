@@ -1,0 +1,2006 @@
+
+// front/src/App.tsx
+import React from 'react';
+import { BrowserRouter as Router, Routes, Route, Navigate } from 'react-router-dom';
+import { useAuth } from './contexts/AuthContext';
+import { Header } from './components/Header';
+import { Footer } from './components/Footer';
+import { Landing } from './pages/Landing';
+import { Login } from './pages/Login';
+import { Main } from './pages/Main';
+import { PptDetails } from './pages/PptDetails';
+import { Cart } from './pages/Cart';
+import { Checkout } from './pages/Checkout';
+import { Admin } from './pages/Admin';
+import { FAQ } from './pages/FAQ';
+import {Success} from "./pages/Success";
+
+const ProtectedRoute = ({ children, requireAdmin = false }: { children: React.ReactNode, requireAdmin?: boolean }) => {
+  const { isAuthenticated, isAdmin } = useAuth();
+  
+  if (!isAuthenticated) return <Navigate to="/login" />;
+  if (requireAdmin && !isAdmin) return <Navigate to="/app" />;
+  
+  return <>{children}</>;
+};
+
+export default function App() {
+  return (
+    <Router>
+      <div className="min-h-screen flex flex-col font-sans bg-white text-gray-900">
+        <Header />
+        <main className="flex-grow flex flex-col">
+          <Routes>
+            <Route path="/" element={<Landing />} />
+            <Route path="/login" element={<Login />} />
+            <Route path="/faq" element={<FAQ />} />
+            <Route path="/success" element={<Success />} />
+
+            <Route path="/app" element={
+              <ProtectedRoute>
+                <Main />
+              </ProtectedRoute>
+            } />
+            
+            <Route path="/ppt/:id" element={
+              <ProtectedRoute>
+                <PptDetails />
+              </ProtectedRoute>
+            } />
+            
+            <Route path="/cart" element={
+              <ProtectedRoute>
+                <Cart />
+              </ProtectedRoute>
+            } />
+            
+            <Route path="/checkout" element={
+              <ProtectedRoute>
+                <Checkout />
+              </ProtectedRoute>
+            } />
+            
+            <Route path="/admin" element={
+              <ProtectedRoute requireAdmin={true}>
+                <Admin />
+              </ProtectedRoute>
+            } />
+          </Routes>
+        </main>
+        <Footer />
+      </div>
+    </Router>
+  );
+}
+
+
+// front/src/api.ts
+import {Language} from './translations';
+
+export const BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:5091/api';
+
+export const getAuthToken = () => localStorage.getItem('token');
+
+export const setAuthToken = (token: string) => localStorage.setItem('token', token);
+
+export const removeAuthToken = () => localStorage.removeItem('token');
+
+const request = async (endpoint: string, options: RequestInit = {}) => {
+  const token = getAuthToken();
+  const headers: HeadersInit = {
+    ...options.headers,
+  };
+
+  if (token) {
+    headers['Authorization'] = `Bearer ${token}`;
+  }
+
+  // If body is FormData, don't set Content-Type, let browser set it with boundary
+  if (!(options.body instanceof FormData)) {
+    headers['Content-Type'] = 'application/json';
+  }
+
+  const response = await fetch(`${BASE_URL}${endpoint}`, {
+    ...options,
+    headers,
+  });
+
+  if (!response.ok) {
+    let errorMsg = 'An error occurred';
+    try {
+      const errorData = await response.json();
+      errorMsg = errorData.error || errorData.message || errorMsg;
+    } catch {
+      try {
+        errorMsg = await response.text() || errorMsg;
+      } catch {}
+    }
+    throw new Error(errorMsg);
+  }
+
+  // Handle empty responses (like 204 No Content)
+  const text = await response.text();
+  return text ? JSON.parse(text) : null;
+};
+
+export const api = {
+  auth: {
+    register: (data: any, lang: Language) =>
+        request(`/auth/register?lang=${lang}`, {
+          method: 'POST',
+          body: JSON.stringify(data),
+        }),
+    verifyEmail: (data: any) => request('/auth/verify-email', {method: 'POST', body: JSON.stringify(data),}),
+    login: (data: any) => request('/Auth/login', { method: 'POST', body: JSON.stringify(data) }),
+  },
+  ppt: {
+    getAll: () => request('/Ppt', { method: 'GET' }),
+    getById: (id: string) => request(`/Ppt/${id}`, { method: 'GET' }),
+    buy: async (ids: string[]) => {
+      const token = getAuthToken();
+      const response = await fetch(`${BASE_URL}/Ppt/buy?${ids.map(id => `ids=${id}`).join('&')}`, {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${token}`
+        }
+      });
+      if (!response.ok) throw new Error('Failed to buy');
+      return response.blob();
+    },
+    create: (formData: FormData) => request('/Ppt', { method: 'POST', body: formData }),
+    update: (id: string, formData: FormData) => request(`/Ppt/${id}`, { method: 'PUT', body: formData }),
+    delete: (id: string) => request(`/Ppt/${id}`, { method: 'DELETE' }),
+    getList: (ids: string[]) => request(`/ppt/list-by-ids?${ids.map(id => `ids=${id}`).join('&')}`, { method: 'GET' }),
+    download: async (id: string) => {
+      const token = getAuthToken();
+      const response = await fetch(`${BASE_URL}/ppt/download/${id}`, {
+        method: 'GET',
+        headers: {
+          'Authorization': `Bearer ${token}`
+        }
+      });
+
+      if (!response.ok) throw new Error('Download failed');
+
+      // Получаем файл как Blob (бинарный объект)
+      const blob = await response.blob();
+
+      // Извлекаем имя файла из заголовков (опционально) или задаем вручную
+      const url = window.URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `presentation_${id}.pptx`; // Имя файла
+      document.body.appendChild(a);
+      a.click();
+      window.URL.revokeObjectURL(url);
+      document.body.removeChild(a);
+    },
+  },
+  payment: {
+    create: async (ids: string[]) => {
+      return await request('/payment/create', {
+        method: 'POST',
+        body: JSON.stringify(ids),
+      });
+    }
+  }
+};
+
+
+// front/src/components/Footer.tsx
+import React from 'react';
+import { useLanguage } from '../contexts/LanguageContext';
+
+export const Footer = () => {
+  const { t } = useLanguage();
+  
+  return (
+    <footer className="bg-gray-50 border-t border-gray-200 mt-auto">
+      <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
+        <div className="flex flex-col md:flex-row justify-between items-center gap-4">
+          <div className="flex items-center gap-2">
+            <div className="w-6 h-6 bg-[#fd2d55] rounded flex items-center justify-center">
+              <span className="text-white font-bold text-xs">P</span>
+            </div>
+            <span className="font-bold text-gray-900">{t('app_name')}</span>
+          </div>
+          <p className="text-gray-500 text-sm">
+            &copy; {new Date().getFullYear()} {t('app_name')}. All rights reserved.
+          </p>
+        </div>
+      </div>
+    </footer>
+  );
+};
+
+
+// front/src/components/Header.tsx
+import React from 'react';
+import { Link, useNavigate } from 'react-router-dom';
+import { useAuth } from '../contexts/AuthContext';
+import { useLanguage } from '../contexts/LanguageContext';
+import { useCart } from '../contexts/CartContext';
+import { ShoppingCart, LogOut, User, Globe, Shield } from 'lucide-react';
+
+export const Header = () => {
+  const { isAuthenticated, isAdmin, logout } = useAuth();
+  const { lang, setLang, t } = useLanguage();
+  const { items } = useCart();
+  const navigate = useNavigate();
+
+  const handleLogout = () => {
+    logout();
+    navigate('/');
+  };
+
+  return (
+    <header className="bg-white shadow-sm sticky top-0 z-50">
+      <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+        <div className="flex justify-between items-center h-16">
+          <div className="flex items-center">
+            <Link to={isAuthenticated ? "/app" : "/"} className="flex items-center gap-2">
+              <div className="w-8 h-8 bg-[#fd2d55] rounded-lg flex items-center justify-center">
+                <span className="text-white font-bold text-xl">P</span>
+              </div>
+              <span className="font-bold text-xl text-gray-900">{t('app_name')}</span>
+            </Link>
+          </div>
+
+          <div className="flex items-center gap-6">
+            <button
+              onClick={() => setLang(lang === 'en' ? 'ru' : 'en')}
+              className="flex items-center gap-1 text-gray-600 hover:text-[#fd2d55] transition-colors"
+            >
+              <Globe size={18} />
+              <span className="uppercase text-sm font-medium">{lang}</span>
+            </button>
+
+            <Link to="/faq" className="text-gray-600 hover:text-[#fd2d55] transition-colors font-medium">
+              {t('faq')}
+            </Link>
+
+            {isAuthenticated ? (
+              <>
+                {isAdmin && (
+                  <Link to="/admin" className="flex items-center gap-1 text-gray-600 hover:text-[#fd2d55] transition-colors">
+                    <Shield size={18} />
+                    <span className="hidden sm:inline font-medium">Admin</span>
+                  </Link>
+                )}
+                <Link to="/cart" className="relative text-gray-600 hover:text-[#fd2d55] transition-colors">
+                  <ShoppingCart size={24} />
+                  {items.length > 0 && (
+                    <span className="absolute -top-2 -right-2 bg-[#fd2d55] text-white text-xs font-bold rounded-full w-5 h-5 flex items-center justify-center">
+                      {items.length}
+                    </span>
+                  )}
+                </Link>
+                <button onClick={handleLogout} className="flex items-center gap-1 text-gray-600 hover:text-[#fd2d55] transition-colors">
+                  <LogOut size={20} />
+                </button>
+              </>
+            ) : (
+              <Link
+                to="/login"
+                className="bg-[#fd2d55] text-white px-5 py-2 rounded-full font-medium hover:bg-opacity-90 transition-all shadow-sm hover:shadow-md"
+              >
+                {t('login')}
+              </Link>
+            )}
+          </div>
+        </div>
+      </div>
+    </header>
+  );
+};
+
+
+// front/src/components/PptCard.tsx
+import React from 'react';
+import { Link, useNavigate } from 'react-router-dom';
+import { useLanguage } from '../contexts/LanguageContext';
+import { useAuth } from '../contexts/AuthContext';
+import { BASE_URL } from '../api';
+
+interface PptCardProps {
+  ppt: any;
+}
+
+export const PptCard = ({ ppt }: PptCardProps) => {
+  const { formatPrice, lang, t } = useLanguage();
+  const { isAuthenticated } = useAuth();
+  const navigate = useNavigate();
+
+  const title = ppt.name;
+  const price = ppt.price;
+  const desc = lang === 'ru' ? ppt.shortDescriptionRu : ppt.shortDescriptionEn;
+  const image = ppt.images && ppt.images.length > 0 
+    ? `${BASE_URL.replace('/api', '')}/${ppt.images[0].replace('./', '')}` 
+    : 'https://picsum.photos/seed/ppt/400/300';
+
+  const handleClick = (e: React.MouseEvent) => {
+    if (!isAuthenticated) {
+      e.preventDefault();
+      navigate('/login');
+    }
+  };
+
+  return (
+    <Link 
+      to={`/ppt/${ppt.id}`} 
+      onClick={handleClick}
+      className="group bg-white rounded-2xl overflow-hidden shadow-sm hover:shadow-xl transition-all duration-300 border border-gray-100 flex flex-col h-full"
+    >
+      <div className="aspect-video w-full overflow-hidden bg-gray-100 relative">
+        <img 
+          src={image} 
+          alt={title} 
+          className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-500"
+          referrerPolicy="no-referrer"
+        />
+        <div className="absolute top-3 right-3 bg-white/90 backdrop-blur-sm px-3 py-1 rounded-full text-xs font-bold text-[#fd2d55] shadow-sm">
+          {formatPrice(ppt.price)}
+        </div>
+      </div>
+      <div className="p-5 flex flex-col flex-grow">
+        <h3 className="font-bold text-lg text-gray-900 mb-2 line-clamp-1 group-hover:text-[#fd2d55] transition-colors">{title}</h3>
+        <p className="text-gray-500 text-sm line-clamp-2 mb-4 flex-grow">{desc}</p>
+        <div className="flex justify-between items-center mt-auto pt-4 border-t border-gray-50">
+          <span className="text-[#fd2d55] font-semibold text-sm group-hover:underline">{t('explore_now')} &rarr;</span>
+        </div>
+      </div>
+    </Link>
+  );
+};
+
+
+// front/src/contexts/AuthContext.tsx
+import React, { createContext, useContext, useState, useEffect, ReactNode } from 'react';
+import { getAuthToken, setAuthToken, removeAuthToken } from '../api';
+import { jwtDecode } from 'jwt-decode';
+
+interface User {
+  id: string;
+  email: string;
+  role: string;
+}
+
+interface AuthContextType {
+  user: User | null;
+  token: string | null;
+  login: (token: string) => void;
+  logout: () => void;
+  isAuthenticated: boolean;
+  isAdmin: boolean;
+}
+
+const AuthContext = createContext<AuthContextType | undefined>(undefined);
+
+export const AuthProvider = ({ children }: { children: ReactNode }) => {
+  const [token, setTokenState] = useState<string | null>(getAuthToken());
+  const [user, setUser] = useState<User | null>(null);
+
+  useEffect(() => {
+    if (token) {
+      try {
+        const decoded: any = jwtDecode(token);
+        setUser({
+          id: decoded['http://schemas.xmlsoap.org/ws/2005/05/identity/claims/nameidentifier'] || decoded.sub || '',
+          email: decoded['http://schemas.xmlsoap.org/ws/2005/05/identity/claims/emailaddress'] || decoded.email || '',
+          role: decoded['http://schemas.microsoft.com/ws/2008/06/identity/claims/role'] || decoded.role || 'User',
+        });
+      } catch (e) {
+        console.error('Invalid token', e);
+        logout();
+      }
+    } else {
+      setUser(null);
+    }
+  }, [token]);
+
+  const login = (newToken: string) => {
+    setAuthToken(newToken);
+    setTokenState(newToken);
+  };
+
+  const logout = () => {
+    removeAuthToken();
+    setTokenState(null);
+  };
+
+  return (
+    <AuthContext.Provider value={{
+      user,
+      token,
+      login,
+      logout,
+      isAuthenticated: !!token,
+      isAdmin: user?.role === 'Admin'
+    }}>
+      {children}
+    </AuthContext.Provider>
+  );
+};
+
+export const useAuth = () => {
+  const context = useContext(AuthContext);
+  if (!context) throw new Error('useAuth must be used within AuthProvider');
+  return context;
+};
+
+
+// front/src/contexts/CartContext.tsx
+import React, { createContext, useContext, useState, ReactNode } from 'react';
+
+export interface CartItem {
+  id: string;
+  name: string;
+  price: number;
+  image?: string;
+}
+
+interface CartContextType {
+  items: CartItem[];
+  addToCart: (item: CartItem) => void;
+  removeFromCart: (id: string) => void;
+  clearCart: () => void;
+  total: number;
+}
+
+const CartContext = createContext<CartContextType | undefined>(undefined);
+
+export const CartProvider = ({ children }: { children: ReactNode }) => {
+  const [items, setItems] = useState<CartItem[]>([]);
+
+  const addToCart = (item: CartItem) => {
+    if (!items.find(i => i.id === item.id)) {
+      setItems([...items, item]);
+    }
+  };
+
+  const removeFromCart = (id: string) => {
+    setItems(items.filter(i => i.id !== id));
+  };
+
+  const clearCart = () => {
+    setItems([]);
+  };
+
+  const total = items.reduce((sum, item) => sum + item.price, 0);
+
+  return (
+    <CartContext.Provider value={{ items, addToCart, removeFromCart, clearCart, total }}>
+      {children}
+    </CartContext.Provider>
+  );
+};
+
+export const useCart = () => {
+  const context = useContext(CartContext);
+  if (!context) throw new Error('useCart must be used within CartProvider');
+  return context;
+};
+
+
+// front/src/contexts/LanguageContext.tsx
+// front/src/contexts/LanguageContext.tsx
+import React, { createContext, useContext, useState, ReactNode, useEffect } from 'react';
+import { translations, Language } from '../translations';
+
+interface LanguageContextType {
+  lang: Language;
+  setLang: (lang: Language) => void;
+  t: (key: keyof typeof translations.en, params?: Record<string, string | number>) => string;
+  formatPrice: (priceUsd: number) => string; // Новая функция для форматирования
+}
+
+const LanguageContext = createContext<LanguageContextType | undefined>(undefined);
+
+export const LanguageProvider = ({ children }: { children: ReactNode }) => {
+  const [lang, setLang] = useState<Language>('ru');
+  const [exchangeRate, setExchangeRate] = useState<number>(90); // Дефолтный курс, если API недоступен
+
+  // Загрузка актуального курса при инициализации
+  useEffect(() => {
+    const fetchRate = async () => {
+      try {
+        // Используем публичный API для получения курса USD/RUB
+        const response = await fetch('https://open.er-api.com/v6/latest/USD');
+        const data = await response.json();
+        if (data && data.rates && data.rates.RUB) {
+          setExchangeRate(data.rates.RUB);
+        }
+      } catch (error) {
+        console.error('Failed to fetch exchange rate:', error);
+      }
+    };
+    fetchRate();
+  }, []);
+
+  const t = (key: keyof typeof translations.en, params?: Record<string, string | number>) => {
+    let text = translations[lang][key] || translations['en'][key] || key;
+    if (params) {
+      Object.keys(params).forEach(k => {
+        text = text.replace(`{${k}}`, String(params[k]));
+      });
+    }
+    return text;
+  };
+
+  // Логика конвертации и форматирования
+  const formatPrice = (priceUsd: number) => {
+    if (lang === 'ru') {
+      const priceRub = Math.round(priceUsd * exchangeRate);
+      return new Intl.NumberFormat('ru-RU', {
+        style: 'currency',
+        currency: 'RUB',
+        maximumFractionDigits: 0,
+      }).format(priceRub);
+    }
+    return new Intl.NumberFormat('en-US', {
+      style: 'currency',
+      currency: 'USD',
+    }).format(priceUsd);
+  };
+
+  return (
+      <LanguageContext.Provider value={{ lang, setLang, t, formatPrice }}>
+        {children}
+      </LanguageContext.Provider>
+  );
+};
+
+export const useLanguage = () => {
+  const context = useContext(LanguageContext);
+  if (!context) throw new Error('useLanguage must be used within LanguageProvider');
+  return context;
+};
+
+// front/src/main.tsx
+import {StrictMode} from 'react';
+import {createRoot} from 'react-dom/client';
+import App from './App.tsx';
+import './index.css';
+import { AuthProvider } from './contexts/AuthContext';
+import { LanguageProvider } from './contexts/LanguageContext';
+import { CartProvider } from './contexts/CartContext';
+
+createRoot(document.getElementById('root')!).render(
+  <StrictMode>
+    <AuthProvider>
+      <LanguageProvider>
+        <CartProvider>
+          <App />
+        </CartProvider>
+      </LanguageProvider>
+    </AuthProvider>
+  </StrictMode>,
+);
+
+
+// front/src/pages/Admin.tsx
+import React, { useEffect, useState, useRef } from 'react';
+import { useLanguage } from '../contexts/LanguageContext';
+import { api, BASE_URL } from '../api';
+import { motion } from 'motion/react';
+import { Plus, Edit2, Trash2, Download, X, Image as ImageIcon, FileText } from 'lucide-react';
+
+export const Admin = () => {
+  const { t } = useLanguage();
+  const [ppts, setPpts] = useState<any[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [isModalOpen, setIsModalOpen] = useState(false);
+  const [editingPpt, setEditingPpt] = useState<any>(null);
+
+  // Form state
+  const [name, setName] = useState('');
+  const [descRu, setDescRu] = useState('');
+  const [sDescRu, setSDescRu] = useState('');
+  const [descEn, setDescEn] = useState('');
+  const [sDescEn, setSDescEn] = useState('');
+  const [price, setPrice] = useState<number>(0.0);
+  const [file, setFile] = useState<File | null>(null);
+  const [images, setImages] = useState<File[]>([]);
+  const [submitting, setSubmitting] = useState(false);
+
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const imagesInputRef = useRef<HTMLInputElement>(null);
+
+  const fetchPpts = async () => {
+    setLoading(true);
+    try {
+      const data = await api.ppt.getAll();
+      setPpts(data);
+    } catch (error) {
+      console.error(error);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    fetchPpts();
+  }, []);
+
+  const openModal = (ppt: any = null) => {
+    setEditingPpt(ppt);
+    if (ppt) {
+      setName(ppt.name);
+      setDescRu(ppt.descriptionRu);
+      setSDescRu(ppt.shortDescriptionRu);
+      setDescEn(ppt.descriptionEn);
+      setSDescEn(ppt.shortDescriptionEn);
+      setPrice(ppt.price);
+    } else {
+      setName('');
+      setDescRu('');
+      setSDescRu('');
+      setDescEn('');
+      setSDescEn('');
+      setPrice(0.0);
+    }
+    setFile(null);
+    setImages([]);
+    setIsModalOpen(true);
+  };
+
+  const closeModal = () => {
+    setIsModalOpen(false);
+    setEditingPpt(null);
+  };
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setSubmitting(true);
+
+    const formData = new FormData();
+    formData.append('name', name);
+    formData.append('descRu', descRu);
+    formData.append('sDescRu', sDescRu);
+    formData.append('descEn', descEn);
+    formData.append('sDescEn', sDescEn);
+    formData.append('price', price.toString());
+
+    if (file) {
+      formData.append('file', file);
+    }
+
+    if (images.length > 0) {
+      images.forEach((img) => formData.append('images', img));
+    }
+
+    try {
+      if (editingPpt) {
+        await api.ppt.update(editingPpt.id, formData);
+      } else {
+        if (!file) throw new Error('File is required for new presentation');
+        await api.ppt.create(formData);
+      }
+      closeModal();
+      fetchPpts();
+    } catch (error: any) {
+      console.error(error);
+      alert(error.message || 'Error saving presentation');
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  const handleDelete = async (id: string) => {
+    if (window.confirm('Are you sure you want to delete this presentation?')) {
+      try {
+        await api.ppt.delete(id);
+        fetchPpts();
+      } catch (error) {
+        console.error(error);
+        alert('Error deleting presentation');
+      }
+    }
+  };
+
+  // Drag & Drop handlers
+  const onFileDrop = (e: React.DragEvent<HTMLDivElement>) => {
+    e.preventDefault();
+    const dropped = e.dataTransfer.files;
+    if (dropped && dropped.length > 0) {
+      setFile(dropped[0]);
+    }
+  };
+
+  const onImagesDrop = (e: React.DragEvent<HTMLDivElement>) => {
+    e.preventDefault();
+    const dropped = Array.from(e.dataTransfer.files).filter((f) => f.type.startsWith('image/'));
+    if (dropped.length > 0) {
+      setImages((prev) => [...prev, ...dropped]);
+    }
+  };
+
+  const preventDefaults = (e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+  };
+
+  const removeImage = (idx: number) => {
+    setImages((prev) => prev.filter((_, i) => i !== idx));
+  };
+
+  return (
+      <div className="flex-grow bg-gray-50 py-12">
+        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+          <div className="flex justify-between items-center mb-8">
+            <h1 className="text-3xl font-bold text-gray-900">{t('admin_dashboard')}</h1>
+            <button
+                onClick={() => openModal()}
+                className="bg-[#fd2d55] text-white px-6 py-3 rounded-xl font-bold hover:bg-opacity-90 transition-all shadow-sm flex items-center gap-2"
+            >
+              <Plus size={20} />
+              {t('create_new')}
+            </button>
+          </div>
+
+          {loading ? (
+              <div className="flex justify-center py-20">
+                <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-[#fd2d55]"></div>
+              </div>
+          ) : (
+              <div className="bg-white rounded-2xl shadow-sm border border-gray-100 overflow-hidden">
+                <div className="overflow-x-auto">
+                  <table className="w-full text-left border-collapse">
+                    <thead>
+                    <tr className="bg-gray-50 border-b border-gray-100">
+                      <th className="p-4 font-semibold text-gray-600">Image</th>
+                      <th className="p-4 font-semibold text-gray-600">{t('name')}</th>
+                      <th className="p-4 font-semibold text-gray-600">Bought</th>
+                      <th className="p-4 font-semibold text-gray-600">Price</th>
+                      <th className="p-4 font-semibold text-gray-600 text-right">Actions</th>
+                    </tr>
+                    </thead>
+                    <tbody className="divide-y divide-gray-100">
+                    {ppts.map((ppt) => (
+                        <tr key={ppt.id} className="hover:bg-gray-50/50 transition-colors">
+                          <td className="p-4">
+                            <div className="w-16 h-12 bg-gray-100 rounded overflow-hidden">
+                              {ppt.images && ppt.images.length > 0 ? (
+                                  <img
+                                      src={`${BASE_URL.replace('/api', '')}/${ppt.images[0].replace('./', '')}`}
+                                      alt=""
+                                      className="w-full h-full object-cover"
+                                      referrerPolicy="no-referrer"
+                                  />
+                              ) : (
+                                  <div className="w-full h-full flex items-center justify-center text-gray-400">
+                                    <ImageIcon size={20} />
+                                  </div>
+                              )}
+                            </div>
+                          </td>
+                          <td className="p-4 font-medium text-gray-900">{ppt.name}</td>
+                          <td className="p-4 text-gray-500">{ppt.bought}</td>
+                          <td className="p-4 text-gray-500">{ppt.price}</td>
+                          <td className="p-4">
+                            <div className="flex justify-end gap-2">
+                              <a
+                                  href={`${BASE_URL.replace('/api', '')}/${ppt.path.replace('./', '')}`}
+                                  target="_blank"
+                                  rel="noopener noreferrer"
+                                  className="p-2 text-blue-500 hover:bg-blue-50 rounded-lg transition-colors"
+                                  title={t('download')}
+                              >
+                                <Download size={20} />
+                              </a>
+                              <button
+                                  onClick={() => openModal(ppt)}
+                                  className="p-2 text-amber-500 hover:bg-amber-50 rounded-lg transition-colors"
+                                  title={t('edit')}
+                              >
+                                <Edit2 size={20} />
+                              </button>
+                              <button
+                                  onClick={() => handleDelete(ppt.id)}
+                                  className="p-2 text-red-500 hover:bg-red-50 rounded-lg transition-colors"
+                                  title={t('delete')}
+                              >
+                                <Trash2 size={20} />
+                              </button>
+                            </div>
+                          </td>
+                        </tr>
+                    ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+          )}
+        </div>
+
+        {/* Modal */}
+        {isModalOpen && (
+            <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50 backdrop-blur-sm">
+              <motion.div
+                  initial={{ opacity: 0, scale: 0.95 }}
+                  animate={{ opacity: 1, scale: 1 }}
+                  className="bg-white rounded-2xl shadow-xl w-full max-w-3xl max-h-[90vh] overflow-hidden flex flex-col"
+              >
+                <div className="p-6 border-b border-gray-100 flex justify-between items-center bg-gray-50">
+                  <h2 className="text-2xl font-bold text-gray-900">
+                    {editingPpt ? t('edit') : t('create_new')}
+                  </h2>
+                  <button onClick={closeModal} className="text-gray-400 hover:text-gray-600 transition-colors p-2">
+                    <X size={24} />
+                  </button>
+                </div>
+
+                <div className="p-6 overflow-y-auto flex-grow">
+                  <form id="ppt-form" onSubmit={handleSubmit} className="space-y-6">
+                    <div>
+                      <label className="block text-sm font-semibold text-gray-700 mb-2">{t('name')}</label>
+                      <input
+                          type="text"
+                          required
+                          value={name}
+                          onChange={(e) => setName(e.target.value)}
+                          className="w-full px-4 py-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-[#fd2d55] outline-none"
+                      />
+                    </div>
+
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                      <div>
+                        <label className="block text-sm font-semibold text-gray-700 mb-2">{t('sdesc_ru')}</label>
+                        <textarea
+                            required
+                            value={sDescRu}
+                            onChange={(e) => setSDescRu(e.target.value)}
+                            className="w-full px-4 py-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-[#fd2d55] outline-none h-24 resize-none"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-sm font-semibold text-gray-700 mb-2">{t('sdesc_en')}</label>
+                        <textarea
+                            required
+                            value={sDescEn}
+                            onChange={(e) => setSDescEn(e.target.value)}
+                            className="w-full px-4 py-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-[#fd2d55] outline-none h-24 resize-none"
+                        />
+                      </div>
+                    </div>
+
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                      <div>
+                        <label className="block text-sm font-semibold text-gray-700 mb-2">{t('desc_ru')}</label>
+                        <textarea
+                            required
+                            value={descRu}
+                            onChange={(e) => setDescRu(e.target.value)}
+                            className="w-full px-4 py-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-[#fd2d55] outline-none h-32 resize-none"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-sm font-semibold text-gray-700 mb-2">{t('desc_en')}</label>
+                        <textarea
+                            required
+                            value={descEn}
+                            onChange={(e) => setDescEn(e.target.value)}
+                            className="w-full px-4 py-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-[#fd2d55] outline-none h-32 resize-none"
+                        />
+                      </div>
+                    </div>
+                    <div>
+                      <div>
+                      <label className="block text-sm font-semibold text-gray-700 mb-2">{t('price')}</label>
+                      <input
+                          type="number"
+                          step="0.01"
+                          min="0"
+                          required
+                          value={price}
+                          onChange={(e) => {
+                            const val = e.target.value;
+                            console.log(val);
+                            const parsedValue = Number.parseFloat(val.replace(',', '.'))
+                            console.log(parsedValue);
+                            setPrice(isNaN(parsedValue) ? 0 : parsedValue);
+                          }}
+                          className="w-full px-4 py-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-[#fd2d55] outline-none h-10 resize-none"
+                      />
+                      </div>
+                    </div>
+                    {/* File Dropzone */}
+                    <div>
+                      <label className="block text-sm font-semibold text-gray-700 mb-2">
+                        {t('file')} {editingPpt && '(Leave empty to keep current)'}
+                      </label>
+                      <div
+                          onClick={() => fileInputRef.current?.click()}
+                          onDrop={onFileDrop}
+                          onDragOver={preventDefaults}
+                          onDragEnter={preventDefaults}
+                          className="border-2 border-dashed border-gray-300 rounded-xl p-6 text-center hover:border-[#fd2d55] transition-colors cursor-pointer bg-gray-50"
+                      >
+                        <FileText className="mx-auto text-gray-400 mb-2" size={32} />
+                        <span className="text-sm text-gray-500">
+                      {file ? file.name : 'Drag & drop PPT here or click'}
+                    </span>
+                        <input
+                            type="file"
+                            ref={fileInputRef}
+                            onChange={(e) => setFile(e.target.files?.[0] || null)}
+                            className="hidden"
+                            accept=".ppt,.pptx,.pptm,.ppsx"
+                        />
+                      </div>
+                    </div>
+
+                    {/* Images Dropzone */}
+                    <div>
+                      <label className="block text-sm font-semibold text-gray-700 mb-2">
+                        {t('images')} {editingPpt && '(Leave empty to keep current)'}
+                      </label>
+                      <div
+                          onClick={() => imagesInputRef.current?.click()}
+                          onDrop={onImagesDrop}
+                          onDragOver={preventDefaults}
+                          onDragEnter={preventDefaults}
+                          className="border-2 border-dashed border-gray-300 rounded-xl p-6 text-center hover:border-[#fd2d55] transition-colors cursor-pointer bg-gray-50"
+                      >
+                        <ImageIcon className="mx-auto text-gray-400 mb-2" size={32} />
+                        <span className="text-sm text-gray-500">
+                      {images.length > 0 ? `${images.length} images selected` : 'Drag & drop images or click'}
+                    </span>
+                        <input
+                            type="file"
+                            ref={imagesInputRef}
+                            onChange={(e) => setImages(e.target.files ? Array.from(e.target.files) : [])}
+                            className="hidden"
+                            accept="image/*"
+                            multiple
+                        />
+                      </div>
+
+                      {/* Preview */}
+                      {images.length > 0 && (
+                          <div className="mt-4 grid grid-cols-3 gap-3">
+                            {images.map((img, idx) => (
+                                <div key={idx} className="relative group">
+                                  <img
+                                      src={URL.createObjectURL(img)}
+                                      alt="preview"
+                                      className="w-full h-24 object-cover rounded-lg border"
+                                  />
+                                  <button
+                                      type="button"
+                                      onClick={() => removeImage(idx)}
+                                      className="absolute top-1 right-1 bg-black/60 text-white rounded-full p-1 opacity-0 group-hover:opacity-100"
+                                  >
+                                    <X size={14} />
+                                  </button>
+                                </div>
+                            ))}
+                          </div>
+                      )}
+                    </div>
+                  </form>
+                </div>
+
+                <div className="p-6 border-t border-gray-100 bg-gray-50 flex justify-end gap-4">
+                  <button
+                      type="button"
+                      onClick={closeModal}
+                      className="px-6 py-3 rounded-xl font-bold text-gray-600 hover:bg-gray-200 transition-colors"
+                  >
+                    {t('cancel')}
+                  </button>
+                  <button
+                      type="submit"
+                      form="ppt-form"
+                      disabled={submitting}
+                      className="bg-[#fd2d55] text-white px-8 py-3 rounded-xl font-bold hover:bg-opacity-90 transition-all shadow-md disabled:opacity-50 flex items-center gap-2"
+                  >
+                    {submitting && (
+                        <div className="animate-spin rounded-full h-5 w-5 border-b-2 border-white"></div>
+                    )}
+                    {t('save')}
+                  </button>
+                </div>
+              </motion.div>
+            </div>
+        )}
+      </div>
+  );
+};
+
+
+// front/src/pages/Cart.tsx
+import React from 'react';
+import { Link, useNavigate } from 'react-router-dom';
+import { useLanguage } from '../contexts/LanguageContext';
+import { useCart } from '../contexts/CartContext';
+import { motion } from 'motion/react';
+import { Trash2, ShoppingBag, ArrowRight } from 'lucide-react';
+
+export const Cart = () => {
+  const { formatPrice, t } = useLanguage();
+
+  const { items, removeFromCart, total } = useCart();
+  const navigate = useNavigate();
+
+  if (items.length === 0) {
+    return (
+      <div className="flex-grow flex flex-col items-center justify-center bg-gray-50 py-20 px-4">
+        <div className="w-24 h-24 bg-gray-100 text-gray-400 rounded-full flex items-center justify-center mb-6">
+          <ShoppingBag size={48} />
+        </div>
+        <h2 className="text-2xl font-bold text-gray-900 mb-2">{t('cart_empty')}</h2>
+        <Link to="/app" className="text-[#fd2d55] font-medium hover:underline mt-4 flex items-center gap-2">
+          {t('explore_now')} <ArrowRight size={16} />
+        </Link>
+      </div>
+    );
+  }
+
+  return (
+    <div className="flex-grow bg-gray-50 py-12">
+      <div className="max-w-4xl mx-auto px-4 sm:px-6 lg:px-8">
+        <h1 className="text-3xl font-bold text-gray-900 mb-8">{t('cart')}</h1>
+
+        <div className="bg-white rounded-2xl shadow-sm border border-gray-100 overflow-hidden mb-8">
+          <ul className="divide-y divide-gray-100">
+            {items.map((item, i) => (
+              <motion.li 
+                key={item.id}
+                initial={{ opacity: 0, x: -20 }}
+                animate={{ opacity: 1, x: 0 }}
+                transition={{ delay: i * 0.1 }}
+                className="p-6 flex items-center gap-6"
+              >
+                <div className="w-24 h-24 bg-gray-100 rounded-xl overflow-hidden flex-shrink-0">
+                  <img src={item.image} alt={item.name} className="w-full h-full object-cover" referrerPolicy="no-referrer" />
+                </div>
+                <div className="flex-grow">
+                  <h3 className="text-lg font-bold text-gray-900 mb-1">{item.name}</h3>
+                  <p className="text-[#fd2d55] font-bold">{formatPrice(item.price)}</p>
+                </div>
+                <button 
+                  onClick={() => removeFromCart(item.id)}
+                  className="text-gray-400 hover:text-red-500 transition-colors p-2"
+                  title={t('remove')}
+                >
+                  <Trash2 size={24} />
+                </button>
+              </motion.li>
+            ))}
+          </ul>
+        </div>
+
+        <div className="bg-white rounded-2xl shadow-sm border border-gray-100 p-8 flex flex-col sm:flex-row justify-between items-center gap-6">
+          <div>
+            <p className="text-gray-500 font-medium mb-1">{t('total')}</p>
+            <p className="text-4xl font-extrabold text-gray-900">{formatPrice(total)}</p>
+          </div>
+          <button 
+            onClick={() => navigate('/checkout')}
+            className="w-full sm:w-auto bg-[#fd2d55] text-white px-10 py-4 rounded-xl font-bold text-lg hover:bg-opacity-90 transition-all shadow-lg hover:shadow-xl"
+          >
+            {t('checkout')}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+
+// front/src/pages/Checkout.tsx
+import React, { useState } from 'react';
+import { useLanguage } from '../contexts/LanguageContext';
+import { useCart } from '../contexts/CartContext';
+import { api } from '../api';
+import { motion } from 'motion/react';
+import { CreditCard } from 'lucide-react';
+
+export const Checkout = () => {
+  const { t } = useLanguage();
+  const { items, total, clearCart } = useCart();
+  const [loading, setLoading] = useState(false);
+
+  const handlePay = async () => {
+    setLoading(true);
+    try {
+      const ids = items.map(item => item.id);
+
+      // Вызываем новый эндпоинт для ЮKassa
+      const response = await api.payment.create(ids);
+
+      if (response && response.confirmationUrl) {
+        clearCart();
+        // Редирект на страницу оплаты ЮKassa
+        window.location.href = response.confirmationUrl;
+      }
+    } catch (error) {
+      console.error('Payment failed', error);
+      alert('Payment initialization failed. Please try again.');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+      <div className="flex-grow flex items-center justify-center bg-gray-50 py-12 px-4">
+        <motion.div
+            initial={{ y: 20, opacity: 0 }}
+            animate={{ y: 0, opacity: 1 }}
+            className="max-w-md w-full bg-white p-8 rounded-3xl shadow-xl border border-gray-100"
+        >
+          <div className="text-center mb-8">
+            <div className="w-16 h-16 bg-blue-50 text-blue-500 rounded-full flex items-center justify-center mx-auto mb-4">
+              <CreditCard size={32} />
+            </div>
+            <h2 className="text-2xl font-bold text-gray-900">{t('checkout')}</h2>
+          </div>
+
+          <div className="bg-gray-50 p-6 rounded-2xl mb-8 border border-gray-100 border-dashed">
+            <p className="text-center text-gray-500 font-medium mb-2">Оплата через ЮKassa</p>
+            <div className="text-center">
+              <span className="text-sm text-gray-400 uppercase tracking-wider font-bold">Total to pay</span>
+              <p className="text-4xl font-extrabold text-gray-900 mt-1">${total.toFixed(2)}</p>
+            </div>
+          </div>
+
+          <button
+              onClick={handlePay}
+              disabled={loading || items.length === 0}
+              className="w-full bg-[#fd2d55] text-white py-4 rounded-xl font-bold text-lg hover:bg-opacity-90 transition-all shadow-md disabled:opacity-50 flex items-center justify-center gap-2"
+          >
+            {loading ? (
+                <div className="animate-spin rounded-full h-6 w-6 border-b-2 border-white"></div>
+            ) : (
+                <>
+                  <CreditCard size={20} />
+                  {t('pay')} ${total.toFixed(2)}
+                </>
+            )}
+          </button>
+        </motion.div>
+      </div>
+  );
+};
+
+// front/src/pages/FAQ.tsx
+import React from 'react';
+import { useLanguage } from '../contexts/LanguageContext';
+import { motion } from 'motion/react';
+import { HelpCircle } from 'lucide-react';
+
+export const FAQ = () => {
+  const { t } = useLanguage();
+
+  const faqs = [
+    { q: t('faq_q1'), a: t('faq_a1') },
+    { q: t('faq_q2'), a: t('faq_a2') },
+    { q: t('faq_q3'), a: t('faq_a3') },
+  ];
+
+  return (
+    <div className="flex-grow bg-gray-50 py-16">
+      <div className="max-w-3xl mx-auto px-4 sm:px-6 lg:px-8">
+        <div className="text-center mb-12">
+          <div className="w-16 h-16 bg-blue-50 text-blue-500 rounded-full flex items-center justify-center mx-auto mb-6">
+            <HelpCircle size={32} />
+          </div>
+          <h1 className="text-4xl font-extrabold text-gray-900 mb-4">{t('faq')}</h1>
+          <div className="w-24 h-1 bg-[#fd2d55] mx-auto rounded-full" />
+        </div>
+
+        <div className="space-y-6">
+          {faqs.map((faq, i) => (
+            <motion.div 
+              key={i}
+              initial={{ opacity: 0, y: 20 }}
+              animate={{ opacity: 1, y: 0 }}
+              transition={{ delay: i * 0.1 }}
+              className="bg-white rounded-2xl p-8 shadow-sm border border-gray-100 hover:shadow-md transition-shadow"
+            >
+              <h3 className="text-xl font-bold text-gray-900 mb-3 flex items-start gap-3">
+                <span className="text-[#fd2d55]">Q:</span> {faq.q}
+              </h3>
+              <p className="text-gray-600 leading-relaxed pl-8">
+                <span className="font-bold text-gray-400 mr-2">A:</span> {faq.a}
+              </p>
+            </motion.div>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+};
+
+
+// front/src/pages/Landing.tsx
+import React, { useEffect, useState } from 'react';
+import { Link } from 'react-router-dom';
+import { useLanguage } from '../contexts/LanguageContext';
+import { api } from '../api';
+import { PptCard } from '../components/PptCard';
+import { motion } from 'motion/react';
+
+export const Landing = () => {
+  const { t } = useLanguage();
+  const [ppts, setPpts] = useState<any[]>([]);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    const fetchPpts = async () => {
+      try {
+        const data = await api.ppt.getAll();
+        setPpts(data.slice(0, 3)); // Show only top 3 on landing
+      } catch (error) {
+        console.error(error);
+      } finally {
+        setLoading(false);
+      }
+    };
+    fetchPpts();
+  }, []);
+
+  return (
+    <motion.div 
+      initial={{ opacity: 0 }}
+      animate={{ opacity: 1 }}
+      exit={{ opacity: 0 }}
+      className="flex-grow flex flex-col"
+    >
+      {/* Hero Section */}
+      <section className="relative bg-gray-50 overflow-hidden">
+        <div className="absolute inset-0 bg-[#fd2d55]/5 pointer-events-none" />
+        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-24 lg:py-32 relative z-10">
+          <div className="text-center max-w-3xl mx-auto">
+            <motion.h1 
+              initial={{ y: 20, opacity: 0 }}
+              animate={{ y: 0, opacity: 1 }}
+              transition={{ delay: 0.1 }}
+              className="text-5xl md:text-6xl font-extrabold text-gray-900 tracking-tight mb-6"
+            >
+              {t('landing_title')}
+            </motion.h1>
+            <motion.p 
+              initial={{ y: 20, opacity: 0 }}
+              animate={{ y: 0, opacity: 1 }}
+              transition={{ delay: 0.2 }}
+              className="text-xl text-gray-600 mb-10 leading-relaxed"
+            >
+              {t('landing_subtitle')}
+            </motion.p>
+            <motion.div
+              initial={{ y: 20, opacity: 0 }}
+              animate={{ y: 0, opacity: 1 }}
+              transition={{ delay: 0.3 }}
+            >
+              <Link 
+                to="/login" 
+                className="inline-block bg-[#fd2d55] text-white px-8 py-4 rounded-full font-bold text-lg hover:bg-opacity-90 transition-all shadow-lg hover:shadow-xl hover:-translate-y-1"
+              >
+                {t('explore_now')}
+              </Link>
+            </motion.div>
+          </div>
+        </div>
+      </section>
+
+      {/* Featured Section */}
+      <section className="py-20 bg-white">
+        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+          <div className="text-center mb-16">
+            <h2 className="text-3xl font-bold text-gray-900 mb-4">{t('featured_presentations')}</h2>
+            <div className="w-24 h-1 bg-[#fd2d55] mx-auto rounded-full" />
+          </div>
+
+          {loading ? (
+            <div className="flex justify-center py-12">
+              <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-[#fd2d55]"></div>
+            </div>
+          ) : (
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-8">
+              {ppts.map((ppt, i) => (
+                <motion.div
+                  key={ppt.id}
+                  initial={{ opacity: 0, y: 20 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  transition={{ delay: 0.1 * i }}
+                >
+                  <PptCard ppt={ppt} />
+                </motion.div>
+              ))}
+            </div>
+          )}
+        </div>
+      </section>
+    </motion.div>
+  );
+};
+
+
+// front/src/pages/Login.tsx
+import React, { useState } from 'react';
+import { useNavigate } from 'react-router-dom';
+import { useAuth } from '../contexts/AuthContext';
+import { useLanguage } from '../contexts/LanguageContext';
+import { api } from '../api';
+import { motion } from 'motion/react';
+import { Mail, Lock, Key, CheckCircle } from 'lucide-react';
+
+export const Login = () => {
+  const [isLogin, setIsLogin] = useState(true);
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
+  const [confirmPassword, setConfirmPassword] = useState('');
+  const [error, setError] = useState('');
+  const [loading, setLoading] = useState(false);
+  
+  // Email verification mock state
+  const [showVerification, setShowVerification] = useState(false);
+  const [verificationCode, setVerificationCode] = useState('');
+
+  const { login } = useAuth();
+  const { lang, t } = useLanguage();
+  const navigate = useNavigate();
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setError('');
+    setLoading(true);
+
+    try {
+      if (isLogin) {
+        const res = await api.auth.login({ email, password });
+        if (res && res.token) {
+          login(res.token);
+          navigate('/app');
+        }
+      } else {
+        if (password !== confirmPassword) {
+          throw new Error('Passwords do not match');
+        }
+        // Register
+        await api.auth.register({ email, role: 'User' }, lang);
+        // Show verification window (mocking since backend doesn't have the endpoint exposed)
+        setShowVerification(true);
+      }
+    } catch (err: any) {
+      setError(err.message || 'An error occurred');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleVerify = async () => {
+    setError('');
+    setLoading(true);
+
+    try {
+      await api.auth.verifyEmail({
+        email,
+        password,
+        code: verificationCode
+      });
+
+      // после подтверждения — логиним
+      const res = await api.auth.login({ email, password });
+      login(res.token);
+      navigate('/app');
+    } catch (err: any) {
+      setError(err.message || 'Verification failed');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  if (showVerification) {
+    return (
+      <div className="flex-grow flex items-center justify-center bg-gray-50 py-12 px-4 sm:px-6 lg:px-8">
+        <motion.div 
+          initial={{ scale: 0.95, opacity: 0 }}
+          animate={{ scale: 1, opacity: 1 }}
+          className="max-w-md w-full bg-white p-8 rounded-2xl shadow-xl border border-gray-100 text-center"
+        >
+          <div className="w-16 h-16 bg-green-100 text-green-500 rounded-full flex items-center justify-center mx-auto mb-6">
+            <Mail size={32} />
+          </div>
+          <h2 className="text-2xl font-bold text-gray-900 mb-2">{t('email_verification_title')}</h2>
+          <p className="text-gray-500 mb-8">{t('email_verification_desc')}</p>
+          
+          <input
+            type="text"
+            value={verificationCode}
+            onChange={(e) => setVerificationCode(e.target.value)}
+            className="w-full text-center text-2xl tracking-widest px-4 py-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-[#fd2d55] focus:border-transparent outline-none mb-6"
+            placeholder="000000"
+            maxLength={6}
+          />
+          
+          <button
+            onClick={handleVerify}
+            disabled={loading || verificationCode.length < 6}
+            className="w-full bg-[#fd2d55] text-white py-3 rounded-xl font-bold hover:bg-opacity-90 transition-all disabled:opacity-50 flex items-center justify-center gap-2"
+          >
+            {loading ? <div className="animate-spin rounded-full h-5 w-5 border-b-2 border-white"></div> : (
+              <>
+                <CheckCircle size={20} />
+                {t('verify')}
+              </>
+            )}
+          </button>
+        </motion.div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="flex-grow flex items-center justify-center bg-gray-50 py-12 px-4 sm:px-6 lg:px-8">
+      <motion.div 
+        initial={{ y: 20, opacity: 0 }}
+        animate={{ y: 0, opacity: 1 }}
+        className="max-w-md w-full bg-white p-8 rounded-2xl shadow-xl border border-gray-100"
+      >
+        <div className="text-center mb-8">
+          <div className="w-12 h-12 bg-[#fd2d55] rounded-xl flex items-center justify-center mx-auto mb-4">
+            <span className="text-white font-bold text-2xl">P</span>
+          </div>
+          <h2 className="text-3xl font-extrabold text-gray-900">
+            {isLogin ? t('login_title') : t('register_title')}
+          </h2>
+        </div>
+
+        {error && (
+          <div className="bg-red-50 text-red-500 p-4 rounded-xl mb-6 text-sm font-medium border border-red-100">
+            {error}
+          </div>
+        )}
+
+        <form onSubmit={handleSubmit} className="space-y-5">
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1">{t('email')}</label>
+            <div className="relative">
+              <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none text-gray-400">
+                <Mail size={18} />
+              </div>
+              <input
+                type="email"
+                required
+                value={email}
+                onChange={(e) => setEmail(e.target.value)}
+                className="w-full pl-10 pr-4 py-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-[#fd2d55] focus:border-transparent outline-none transition-all"
+                placeholder="you@example.com"
+              />
+            </div>
+          </div>
+
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1">{t('password')}</label>
+            <div className="relative">
+              <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none text-gray-400">
+                <Lock size={18} />
+              </div>
+              <input
+                type="password"
+                required
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+                className="w-full pl-10 pr-4 py-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-[#fd2d55] focus:border-transparent outline-none transition-all"
+                placeholder="••••••••"
+              />
+            </div>
+          </div>
+
+          {!isLogin && (
+            <motion.div initial={{ height: 0, opacity: 0 }} animate={{ height: 'auto', opacity: 1 }}>
+              <label className="block text-sm font-medium text-gray-700 mb-1">{t('confirm_password')}</label>
+              <div className="relative">
+                <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none text-gray-400">
+                  <Key size={18} />
+                </div>
+                <input
+                  type="password"
+                  required
+                  value={confirmPassword}
+                  onChange={(e) => setConfirmPassword(e.target.value)}
+                  className="w-full pl-10 pr-4 py-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-[#fd2d55] focus:border-transparent outline-none transition-all"
+                  placeholder="••••••••"
+                />
+              </div>
+            </motion.div>
+          )}
+
+          <button
+            type="submit"
+            disabled={loading}
+            className="w-full bg-[#fd2d55] text-white py-3 rounded-xl font-bold hover:bg-opacity-90 transition-all disabled:opacity-50 mt-4 shadow-md hover:shadow-lg"
+          >
+            {loading ? <div className="animate-spin rounded-full h-5 w-5 border-b-2 border-white mx-auto"></div> : (isLogin ? t('login') : t('register'))}
+          </button>
+        </form>
+
+        <div className="mt-8 text-center">
+          <button
+            onClick={() => {
+              setIsLogin(!isLogin);
+              setError('');
+            }}
+            className="text-sm text-gray-600 hover:text-[#fd2d55] transition-colors font-medium"
+          >
+            {isLogin ? t('no_account') : t('have_account')} <span className="text-[#fd2d55] underline">{isLogin ? t('register') : t('login')}</span>
+          </button>
+        </div>
+      </motion.div>
+    </div>
+  );
+};
+
+
+// front/src/pages/Main.tsx
+import React, { useEffect, useState } from 'react';
+import { useLanguage } from '../contexts/LanguageContext';
+import { api } from '../api';
+import { PptCard } from '../components/PptCard';
+import { motion } from 'motion/react';
+import { Search } from 'lucide-react';
+
+export const Main = () => {
+  const { t } = useLanguage();
+  const [ppts, setPpts] = useState<any[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [search, setSearch] = useState('');
+
+  useEffect(() => {
+    const fetchPpts = async () => {
+      try {
+        const data = await api.ppt.getAll();
+        setPpts(data);
+      } catch (error) {
+        console.error(error);
+      } finally {
+        setLoading(false);
+      }
+    };
+    fetchPpts();
+  }, []);
+
+  const filteredPpts = ppts.filter(p => p.name.toLowerCase().includes(search.toLowerCase()));
+
+  return (
+    <div className="flex-grow bg-gray-50 py-12">
+      <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+        <div className="flex flex-col md:flex-row justify-between items-center mb-12 gap-6">
+          <h1 className="text-3xl font-bold text-gray-900">{t('main_title')}</h1>
+          
+          <div className="relative w-full md:w-96">
+            <div className="absolute inset-y-0 left-0 pl-4 flex items-center pointer-events-none text-gray-400">
+              <Search size={20} />
+            </div>
+            <input
+              type="text"
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              className="w-full pl-12 pr-4 py-3 bg-white border-none rounded-full shadow-sm focus:ring-2 focus:ring-[#fd2d55] outline-none transition-all"
+              placeholder={t('search_placeholder')}
+            />
+          </div>
+        </div>
+
+        {loading ? (
+          <div className="flex justify-center py-20">
+            <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-[#fd2d55]"></div>
+          </div>
+        ) : (
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-8">
+            {filteredPpts.map((ppt, i) => (
+              <motion.div
+                key={ppt.id}
+                initial={{ opacity: 0, y: 20 }}
+                animate={{ opacity: 1, y: 0 }}
+                transition={{ delay: i * 0.05 }}
+              >
+                <PptCard ppt={ppt} />
+              </motion.div>
+            ))}
+            {filteredPpts.length === 0 && (
+              <div className="col-span-full text-center py-20 text-gray-500">
+                No presentations found.
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+};
+
+
+// front/src/pages/PptDetails.tsx
+import React, { useEffect, useState } from 'react';
+import { useParams, useNavigate } from 'react-router-dom';
+import { useLanguage } from '../contexts/LanguageContext';
+import { useCart } from '../contexts/CartContext';
+import { api, BASE_URL } from '../api';
+import { motion } from 'motion/react';
+import { ShoppingCart, ArrowLeft, Download } from 'lucide-react';
+
+export const PptDetails = () => {
+  const { id } = useParams<{ id: string }>();
+  const { lang, t } = useLanguage();
+  const { addToCart } = useCart();
+  const navigate = useNavigate();
+  
+  const [ppt, setPpt] = useState<any>(null);
+  const [loading, setLoading] = useState(true);
+  const [activeImage, setActiveImage] = useState(0);
+
+  const { formatPrice } = useLanguage();
+
+  useEffect(() => {
+    const fetchPpt = async () => {
+      try {
+        if (id) {
+          const data = await api.ppt.getById(id);
+          setPpt(data);
+        }
+      } catch (error) {
+        console.error(error);
+      } finally {
+        setLoading(false);
+      }
+    };
+    fetchPpt();
+  }, [id]);
+
+  if (loading) {
+    return (
+      <div className="flex-grow flex justify-center items-center bg-gray-50">
+        <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-[#fd2d55]"></div>
+      </div>
+    );
+  }
+
+  if (!ppt) {
+    return <div className="flex-grow flex justify-center items-center">Presentation not found.</div>;
+  }
+
+  const desc = lang === 'ru' ? ppt.descriptionRu : ppt.descriptionEn;
+  const images = ppt.images && ppt.images.length > 0 
+    ? ppt.images.map((img: string) => `${BASE_URL.replace('/api', '')}/${img.replace('./', '')}`) 
+    : ['https://picsum.photos/seed/ppt/800/600'];
+
+  const handleAddToCart = () => {
+    addToCart({
+      id: ppt.id,
+      name: ppt.name,
+      price: ppt.price, // Mock price
+      image: images[0]
+    });
+    navigate('/cart');
+  };
+
+  return (
+    <div className="flex-grow bg-white py-12">
+      <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+        <button 
+          onClick={() => navigate(-1)}
+          className="flex items-center gap-2 text-gray-500 hover:text-[#fd2d55] transition-colors mb-8 font-medium"
+        >
+          <ArrowLeft size={20} />
+          Back
+        </button>
+
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-12">
+          {/* Images Section */}
+          <div className="space-y-4">
+            <motion.div 
+              initial={{ opacity: 0, scale: 0.95 }}
+              animate={{ opacity: 1, scale: 1 }}
+              className="aspect-video bg-gray-100 rounded-2xl overflow-hidden shadow-md border border-gray-100"
+            >
+              <img 
+                src={images[activeImage]} 
+                alt={ppt.name} 
+                className="w-full h-full object-cover"
+                referrerPolicy="no-referrer"
+              />
+            </motion.div>
+            
+            {images.length > 1 && (
+              <div className="flex gap-4 overflow-x-auto pb-2">
+                {images.map((img: string, idx: number) => (
+                  <button 
+                    key={idx}
+                    onClick={() => setActiveImage(idx)}
+                    className={`flex-shrink-0 w-24 aspect-video rounded-lg overflow-hidden border-2 transition-all ${activeImage === idx ? 'border-[#fd2d55] opacity-100' : 'border-transparent opacity-60 hover:opacity-100'}`}
+                  >
+                    <img src={img} alt="" className="w-full h-full object-cover" referrerPolicy="no-referrer" />
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+
+          {/* Details Section */}
+          <motion.div 
+            initial={{ opacity: 0, x: 20 }}
+            animate={{ opacity: 1, x: 0 }}
+            className="flex flex-col"
+          >
+            <h1 className="text-4xl font-extrabold text-gray-900 mb-4">{ppt.name}</h1>
+            
+            <div className="flex items-center gap-4 mb-8">
+              <span className="text-3xl font-bold text-[#fd2d55]">{formatPrice(ppt.price)}</span>
+
+            </div>
+
+            <div className="prose prose-gray max-w-none mb-10 text-gray-600 leading-relaxed">
+              <h3 className="text-lg font-bold text-gray-900 mb-2">{t('description')}</h3>
+              <p className="whitespace-pre-wrap">{desc}</p>
+            </div>
+
+            <div className="mt-auto pt-8 border-t border-gray-100 flex flex-col sm:flex-row gap-4">
+              <button 
+                onClick={handleAddToCart}
+                className="flex-1 bg-[#fd2d55] text-white py-4 rounded-xl font-bold text-lg hover:bg-opacity-90 transition-all shadow-lg hover:shadow-xl flex items-center justify-center gap-2"
+              >
+                <ShoppingCart size={24} />
+                {t('add_to_cart')}
+              </button>
+
+            </div>
+          </motion.div>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+
+// front/src/pages/Success.tsx
+import React, { useEffect, useState } from 'react';
+import { useSearchParams, Link } from 'react-router-dom';
+import { Download, CheckCircle, FileText, Clock } from 'lucide-react';
+import { api, BASE_URL } from '../api';
+
+export const Success = () => {
+    const [searchParams] = useSearchParams();
+    const [ppts, setPpts] = useState<any[]>([]);
+    const ids = searchParams.get('ids')?.split(',') || [];
+
+    useEffect(() => {
+        if (ids.length > 0) {
+            fetch(`${BASE_URL}/ppt/list-by-ids?${ids.map(id => `ids=${id}`).join('&')}`)
+                .then(res => res.json())
+                .then(data => setPpts(data));
+        }
+    }, []);
+
+    const handleDownload = async (id: string) => {
+        try {
+            await api.ppt.download(id);
+        } catch (e) {
+            alert('Оплата еще обрабатывается сервером. Пожалуйста, подождите минуту и обновите страницу, либо проверьте вашу электронную почту.');
+        }
+    };
+
+    return (
+        <div className="flex-grow flex flex-col items-center py-12 px-4">
+            <div className="bg-white p-8 rounded-2xl shadow-xl max-w-2xl w-full text-center">
+                <CheckCircle className="w-16 h-16 text-green-500 mx-auto mb-4" />
+                <h1 className="text-3xl font-bold mb-2">Заказ принят!</h1>
+                <p className="text-gray-600 mb-4">Если оплата прошла успешно, файлы будут отправлены вам на почту, а также станут доступны для скачивания здесь.</p>
+
+                <div className="flex items-center justify-center gap-2 text-amber-600 bg-amber-50 p-3 rounded-lg mb-8 text-sm">
+                    <Clock size={16} />
+                    <span>Обработка платежа может занять до 1-2 минут.</span>
+                </div>
+
+                <div className="space-y-4 mb-8">
+                    {ppts.map((ppt) => (
+                        <div key={ppt.id} className="flex items-center justify-between p-4 bg-gray-50 rounded-xl border border-gray-100">
+                            <div className="flex items-center gap-3">
+                                <FileText className="text-[#fd2d55]" />
+                                <span className="font-medium text-left">{ppt.name}</span>
+                            </div>
+                            <button
+                                onClick={() => handleDownload(ppt.id)}
+                                className="bg-[#fd2d55] text-white p-2 rounded-lg hover:bg-opacity-90 transition-all"
+                                title="Скачать"
+                            >
+                                <Download size={20} />
+                            </button>
+                        </div>
+                    ))}
+                </div>
+
+                <Link to="/app" className="inline-block bg-gray-900 text-white px-8 py-3 rounded-xl font-bold hover:bg-gray-800 transition-all">
+                    Вернуться в магазин
+                </Link>
+            </div>
+        </div>
+    );
+};
+
+// front/src/translations.ts
+export type Language = 'en' | 'ru';
+
+export const translations = {
+  en: {
+    // General
+    app_name: 'PPSecrets',
+    login: 'Log In',
+    register: 'Register',
+    logout: 'Log Out',
+    email: 'Email',
+    password: 'Password',
+    confirm_password: 'Confirm Password',
+    submit: 'Submit',
+    cancel: 'Cancel',
+    loading: 'Loading...',
+    error: 'Error',
+    success: 'Success',
+
+    // Landing
+    landing_title: 'Premium Presentations for Your Success',
+    landing_subtitle: 'Discover our collection of professionally designed PowerPoint templates to make your next pitch unforgettable.',
+    explore_now: 'Explore Now',
+    featured_presentations: 'Featured Presentations',
+
+    // Auth
+    login_title: 'Welcome Back',
+    register_title: 'Create an Account',
+    no_account: "Don't have an account?",
+    have_account: 'Already have an account?',
+    email_verification_title: 'Verify Your Email',
+    email_verification_desc: 'Please enter the code sent to your email.',
+    verify: 'Verify',
+
+    // Main
+    main_title: 'All Presentations',
+    search_placeholder: 'Search presentations...',
+
+    // Ppt Details
+    buy_now: 'Buy Now',
+    add_to_cart: 'Add to Cart',
+    description: 'Description',
+    short_description: 'Short Description',
+    price: 'Price',
+    bought_count: 'Bought: {count} times',
+
+    // Cart & Checkout
+    cart: 'Cart',
+    cart_empty: 'Your cart is empty.',
+    checkout: 'Checkout',
+    total: 'Total',
+    pay: 'Pay',
+    payment_placeholder: 'Payment gateway integration will be here.',
+    remove: 'Remove',
+
+    // Admin
+    admin_dashboard: 'Admin Dashboard',
+    create_new: 'Create New',
+    edit: 'Edit',
+    delete: 'Delete',
+    download: 'Download',
+    name: 'Name',
+    file: 'File',
+    images: 'Images',
+    desc_ru: 'Description (RU)',
+    sdesc_ru: 'Short Description (RU)',
+    desc_en: 'Description (EN)',
+    sdesc_en: 'Short Description (EN)',
+    save: 'Save',
+
+    // FAQ
+    faq: 'FAQ',
+    faq_q1: 'How do I receive my presentation?',
+    faq_a1: 'After purchase, you will be able to download it immediately, and a copy will be sent to your email.',
+    faq_q2: 'Can I edit the presentations?',
+    faq_a2: 'Yes, all our presentations are fully editable in PowerPoint.',
+    faq_q3: 'What payment methods are accepted?',
+    faq_a3: 'We accept all major credit cards.',
+  },
+  ru: {
+    // General
+    app_name: 'PPSecrets',
+    login: 'Войти',
+    register: 'Регистрация',
+    logout: 'Выйти',
+    email: 'Эл. почта',
+    password: 'Пароль',
+    confirm_password: 'Подтвердите пароль',
+    submit: 'Отправить',
+    cancel: 'Отмена',
+    loading: 'Загрузка...',
+    error: 'Ошибка',
+    success: 'Успех',
+
+    // Landing
+    landing_title: 'Премиум презентации для вашего успеха',
+    landing_subtitle: 'Откройте для себя нашу коллекцию профессионально созданных шаблонов PowerPoint, чтобы сделать ваше следующее выступление незабываемым.',
+    explore_now: 'Смотреть сейчас',
+    featured_presentations: 'Популярные презентации',
+
+    // Auth
+    login_title: 'С возвращением',
+    register_title: 'Создать аккаунт',
+    no_account: 'Нет аккаунта?',
+    have_account: 'Уже есть аккаунт?',
+    email_verification_title: 'Подтвердите почту',
+    email_verification_desc: 'Пожалуйста, введите код, отправленный на вашу почту.',
+    verify: 'Подтвердить',
+
+    // Main
+    main_title: 'Все презентации',
+    search_placeholder: 'Поиск презентаций...',
+
+    // Ppt Details
+    buy_now: 'Купить сейчас',
+    add_to_cart: 'В корзину',
+    description: 'Описание',
+    short_description: 'Краткое описание',
+    price: 'Цена',
+    bought_count: 'Куплено: {count} раз',
+
+    // Cart & Checkout
+    cart: 'Корзина',
+    cart_empty: 'Ваша корзина пуста.',
+    checkout: 'Оформление заказа',
+    total: 'Итого',
+    pay: 'Оплатить',
+    payment_placeholder: 'Здесь будет интеграция платежного шлюза.',
+    remove: 'Удалить',
+
+    // Admin
+    admin_dashboard: 'Панель администратора',
+    create_new: 'Создать новую',
+    edit: 'Редактировать',
+    delete: 'Удалить',
+    download: 'Скачать',
+    name: 'Название',
+    file: 'Файл',
+    images: 'Изображения',
+    desc_ru: 'Описание (RU)',
+    sdesc_ru: 'Краткое описание (RU)',
+    desc_en: 'Описание (EN)',
+    sdesc_en: 'Краткое описание (EN)',
+    save: 'Сохранить',
+
+    // FAQ
+    faq: 'FAQ',
+    faq_q1: 'Как я получу свою презентацию?',
+    faq_a1: 'После покупки вы сможете скачать ее сразу, а также копия будет отправлена на вашу почту.',
+    faq_q2: 'Могу ли я редактировать презентации?',
+    faq_a2: 'Да, все наши презентации полностью редактируемы в PowerPoint.',
+    faq_q3: 'Какие способы оплаты принимаются?',
+    faq_a3: 'Мы принимаем все основные кредитные карты.',
+  }
+};
+
+
+// front/vite.config.ts
+import tailwindcss from '@tailwindcss/vite';
+import react from '@vitejs/plugin-react';
+import path from 'path';
+import {defineConfig, loadEnv} from 'vite';
+
+export default defineConfig(({mode}) => {
+  const env = loadEnv(mode, '.', '');
+  return {
+    plugins: [react(), tailwindcss()],
+    define: {
+      'process.env.GEMINI_API_KEY': JSON.stringify(env.GEMINI_API_KEY),
+    },
+    resolve: {
+      alias: {
+        '@': path.resolve(__dirname, '.'),
+      },
+    },
+    server: {
+      // HMR is disabled in AI Studio via DISABLE_HMR env var.
+      // Do not modifyâfile watching is disabled to prevent flickering during agent edits.
+      hmr: process.env.DISABLE_HMR !== 'true',
+    },
+  };
+});
+

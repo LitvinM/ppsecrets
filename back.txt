@@ -1,0 +1,1808 @@
+
+// PptSecrets/Controllers/AuthController.cs
+using Microsoft.AspNetCore.Mvc;
+using PptSecrets.Core.Models;
+using PptSecrets.Core.Services;
+
+namespace PptSecrets.Controllers;
+
+[ApiController]
+[Route("api/auth")]
+public class AuthController : ControllerBase
+{
+    private readonly IUserService _userService;
+
+    public AuthController(IUserService userService)
+    {
+        _userService = userService;
+    }
+
+    [HttpPost("register")]
+    public async Task<IActionResult> Register([FromBody] RegisterRequest request, [FromQuery] Language lang)
+    {
+        await _userService.RegisterAsync(request.Email, lang);
+        return Ok(new { message = "Verification code sent to email" });
+    }
+
+    [HttpPost("verify-email")]
+    public async Task<IActionResult> VerifyEmail([FromBody] VerifyEmailRequest request)
+    {
+        var user = await _userService.VerifyEmailAsync(request.Email, request.Password, request.Code);
+
+        return Ok(new
+        {
+            message = "Email verified, Logged in",
+            userId = user.Id,
+            email = user.Email
+        });
+    }
+
+    [HttpPost("login")]
+    public async Task<IActionResult> Login([FromBody] LoginRequest request)
+    {
+        var token = await _userService.AuthenticateAsync(request.Email, request.Password);
+        if (token == null)
+            return Unauthorized("Invalid email or password");
+
+        return Ok(new { token });
+    }
+}
+
+public class RegisterRequest
+{
+    public string Email { get; set; } = default!;
+}
+
+public class VerifyEmailRequest
+{
+    public string Email { get; set; } = default!;
+    public string Password { get; set; } = default!;
+    public string Code { get; set; } = default!;
+}
+
+public class LoginRequest
+{
+    public string Email { get; set; } = default!;
+    public string Password { get; set; } = default!;
+}
+
+// PptSecrets/Controllers/PaymentController.cs
+using System.Security.Claims;
+using Microsoft.AspNetCore.Authorization;
+using Microsoft.AspNetCore.Mvc;
+using Newtonsoft.Json.Linq;
+using PptSecrets.Core.Entities;
+using PptSecrets.Core.Interfaces;
+using PptSecrets.Core.Services;
+
+[ApiController]
+[Route("api/[controller]")]
+public class PaymentController : ControllerBase
+{
+    private readonly IYooKassaService _yooKassaService;
+    private readonly IUnitOfWork _uow;
+    private readonly IPptService _pptService;
+    private readonly IConfiguration _config;
+
+    public PaymentController(IYooKassaService yooKassaService, IUnitOfWork uow, IPptService pptService, IConfiguration config)
+    {
+        _yooKassaService = yooKassaService;
+        _uow = uow;
+        _pptService = pptService;
+        _config = config;
+    }
+
+    [HttpPost("create")]
+    [Authorize]
+    public async Task<IActionResult> CreatePayment([FromBody] Guid[] pptIds)
+    {
+        var userEmail = User.FindFirstValue(ClaimTypes.Email);
+        if (userEmail == null) return Unauthorized();
+
+        float totalAmount = 0;
+        var validPptIds = new List<Guid>();
+
+        foreach (var id in pptIds)
+        {
+            var ppt = await _uow.Ppts.GetByIdAsync(id);
+            if (ppt != null)
+            {
+                totalAmount += ppt.Price;
+                validPptIds.Add(ppt.Id);
+            }
+        }
+
+        if (totalAmount <= 0) return BadRequest("Сумма заказа должна быть больше нуля.");
+
+        var transaction = new PaymentTransaction
+        {
+            Id = Guid.NewGuid(),
+            UserEmail = userEmail,
+            PptIds = string.Join(",", validPptIds),
+            Amount = totalAmount,
+            Status = "pending"
+        };
+        await _uow.PaymentTransactions.AddAsync(transaction);
+        await _uow.SaveChangesAsync();
+
+        var baseUrl = _config["frontip"] ?? "http://localhost:3000";
+        var returnUrl = $"{baseUrl}/success?ids={transaction.PptIds}";
+
+        try
+        {
+            var confirmationUrl = await _yooKassaService.CreatePaymentAsync(totalAmount, "Оплата презентаций", returnUrl, transaction.Id);
+            return Ok(new { confirmationUrl });
+        }
+        catch (Exception ex)
+        {
+            return BadRequest(new { error = ex.Message });
+        }
+    }
+
+    [HttpPost("webhook")]
+    public async Task<IActionResult> Webhook()
+    {
+        using var reader = new StreamReader(Request.Body);
+        var body = await reader.ReadToEndAsync();
+        var json = JObject.Parse(body);
+
+        var eventType = json["event"]?.ToString();
+        if (eventType == "payment.succeeded")
+        {
+            var paymentObj = json["object"];
+            var transactionIdStr = paymentObj?["metadata"]?["transaction_id"]?.ToString();
+            
+            if (Guid.TryParse(transactionIdStr, out Guid transactionId))
+            {
+                var transaction = await _uow.PaymentTransactions.GetByIdAsync(transactionId);
+                if (transaction != null && transaction.Status == "pending")
+                {
+                    transaction.Status = "succeeded";
+                    transaction.YooKassaPaymentId = paymentObj["id"]?.ToString() ?? "";
+                    _uow.PaymentTransactions.Update(transaction);
+                    await _uow.SaveChangesAsync();
+
+                    var pptIds = transaction.PptIds.Split(',').Select(Guid.Parse).ToList();
+                    await _pptService.ProcessMultiplePurchasesAsync(pptIds, transaction.UserEmail);
+                }
+            }
+        }
+        return Ok();
+    }
+}
+
+// PptSecrets/Controllers/PptController.cs
+using System.Globalization;
+using Microsoft.AspNetCore.Authorization;
+using Microsoft.AspNetCore.Mvc;
+using PptSecrets.Core.Services;
+using System.Security.Claims;
+using PptSecrets.Core.Entities;
+
+namespace PptSecrets.Controllers;
+
+[ApiController]
+[Route("api/[controller]")]
+public class PptController : ControllerBase
+{
+    private readonly IPptService _pptService;
+    private readonly IUserService _userService;
+
+    public PptController(IPptService pptService, IUserService userService)
+    {
+        _pptService = pptService;
+        _userService = userService;
+    }
+
+    [HttpGet]
+    public async Task<IActionResult> GetAll()
+    {
+        var ppts = await _pptService.GetAllAsync();
+        return Ok(ppts);
+    }
+
+    [HttpGet("{id}")]
+    public async Task<IActionResult> GetById(Guid id)
+    {
+        var ppt = await _pptService.GetByIdAsync(id);
+        if (ppt == null) return NotFound();
+        return Ok(ppt);
+    }
+
+    [HttpPost("buy")]
+    [Authorize]
+    public async Task<IActionResult> Buy([FromQuery]Guid[] ids)
+    {
+        var userEmail = User.FindFirstValue(ClaimTypes.Email);
+
+        var list = ids.ToList();
+        
+        await _pptService.ProcessMultiplePurchasesAsync(list, userEmail!); 
+    
+        return Ok(new { message = "Purchase processed" });
+    }
+
+    [HttpGet("download/{id}")]
+    public async Task<IActionResult> Download(Guid id)
+    {
+        var userEmail = User.FindFirstValue(ClaimTypes.Email);
+
+        if (userEmail == null) return Unauthorized();
+        if (!(await _userService.findPermission(userEmail, id))) return Forbid();
+    
+        try 
+        {
+            var (stream, contentType, fileName) = await _pptService.GetPptFileAsync(id);
+        
+            // Метод File с тремя параметрами заставляет браузер 
+            // интерпретировать ответ как загрузку файла (Content-Disposition: attachment)
+            return File(stream, contentType, fileName);
+        }
+        catch (Exception ex)
+        {
+            return NotFound(ex.Message);
+        }
+    }
+
+    [HttpPost]
+    [Authorize(Roles = "Admin")]
+    public async Task<IActionResult> Create([FromForm] string name,
+        [FromForm] string descRu, [FromForm] string sDescRu, [FromForm] string descEn, [FromForm] string sDescEn, [FromForm] float price,
+        [FromForm] IFormFile file, [FromForm] List<IFormFile>? images)
+    {
+        if (file == null || file.Length == 0) return BadRequest("File is empty");
+
+        await using var stream = file.OpenReadStream();
+        
+        var imageStreams = new List<(string FileName, Stream Stream)>();
+        if (images != null)
+        {
+            foreach (var img in images)
+            {
+                if (img.Length > 0)
+                {
+                    imageStreams.Add((img.FileName, img.OpenReadStream()));
+                }
+            }
+        }
+
+        try 
+        {
+            var ppt = await _pptService.CreateAsync(name, file.FileName, descRu, sDescRu, descEn, sDescEn, price, stream, imageStreams);
+            return Ok(ppt);
+        }
+        catch (Exception ex)
+        {
+            return BadRequest(ex.Message);
+        }
+        finally
+        {
+            foreach (var imgStream in imageStreams)
+            {
+                await imgStream.Stream.DisposeAsync();
+            }
+        }
+    }
+
+    [HttpPut("{id}")]
+    [Authorize(Roles = "Admin")]
+    public async Task<IActionResult> Update(Guid id, [FromForm] string name,
+        [FromForm] string descRu, [FromForm] string sDescRu, [FromForm] string descEn, [FromForm] string sDescEn, [FromForm] float price, IFormFile? file, List<IFormFile>? images)
+    {
+        Stream? stream = null;
+        if (file != null) stream = file.OpenReadStream();
+        
+        var imageStreams = new List<(string FileName, Stream Stream)>();
+        if (images != null)
+        {
+            foreach (var img in images)
+            {
+                if (img.Length > 0)
+                {
+                    imageStreams.Add((img.FileName, img.OpenReadStream()));
+                }
+            }
+        }
+        
+        try
+        {
+            var ppt = await _pptService.UpdateAsync(id, name, file?.FileName,  descRu, sDescRu, descEn, sDescEn, stream, imageStreams, price);
+            if (ppt == null) return NotFound();
+            return Ok(ppt);
+        }
+        catch (Exception ex)
+        {
+            return BadRequest(ex.Message);
+        }
+        finally
+        {
+            if (stream != null) await stream.DisposeAsync();
+        }
+    }
+
+    [HttpDelete("{id}")]
+    [Authorize(Roles = "Admin")]
+    public async Task<IActionResult> Delete(Guid id)
+    {
+        var result = await _pptService.DeleteAsync(id);
+        if (!result) return NotFound();
+        return NoContent();
+    }
+    
+    [HttpGet("list-by-ids")]
+    public async Task<IActionResult> GetPptsByIds([FromQuery] Guid[] ids)
+    {
+        var ppts = new List<Ppt>();
+        foreach (var id in ids)
+        {
+            var ppt = await _pptService.GetByIdAsync(id);
+            if (ppt != null) ppts.Add(ppt);
+        }
+        return Ok(ppts);
+    }
+}
+
+// PptSecrets/ExceptionHandler/ExceptionHandlerMiddleware.cs
+using System.Net;
+using Newtonsoft.Json;
+
+namespace PptSecrets.ExceptionHandler;
+
+public class ExceptionHandlerMiddleware
+{
+    private readonly RequestDelegate _next;
+    private readonly ILogger<ExceptionHandlerMiddleware> _logger;
+
+    public ExceptionHandlerMiddleware(RequestDelegate next, ILogger<ExceptionHandlerMiddleware> logger)
+    {
+        _next = next;
+        _logger = logger;
+    }
+
+    public async Task InvokeAsync(HttpContext context)
+    {
+        try
+        {
+            await _next(context);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "An unhandled exception occurred.");
+            await HandleExceptionAsync(context, ex);
+        }
+    }
+
+    private static Task HandleExceptionAsync(HttpContext context, Exception exception)
+    {
+        var code = HttpStatusCode.InternalServerError; 
+
+        if (exception is ArgumentException or InvalidOperationException)
+            code = HttpStatusCode.BadRequest;
+
+        var result = JsonConvert.SerializeObject(new { error = exception.Message });
+        
+        context.Response.ContentType = "application/json";
+        context.Response.StatusCode = (int)code;
+
+        return context.Response.WriteAsync(result);
+    }
+}
+
+// PptSecrets/PptSecrets.csproj
+<Project Sdk="Microsoft.NET.Sdk.Web">
+
+    <PropertyGroup>
+        <TargetFramework>net9.0</TargetFramework>
+        <Nullable>enable</Nullable>
+        <ImplicitUsings>enable</ImplicitUsings>
+        <DockerDefaultTargetOS>Windows</DockerDefaultTargetOS>
+    </PropertyGroup>
+
+    <ItemGroup>
+      <Content Include="..\.dockerignore">
+        <Link>.dockerignore</Link>
+      </Content>
+    </ItemGroup>
+
+    <ItemGroup>
+      <_ContentIncludedByDefault Remove="Views\Home\Index.cshtml" />
+      <_ContentIncludedByDefault Remove="Views\Home\Privacy.cshtml" />
+      <_ContentIncludedByDefault Remove="Views\Shared\Error.cshtml" />
+      <_ContentIncludedByDefault Remove="Views\Shared\_Layout.cshtml" />
+      <_ContentIncludedByDefault Remove="Views\Shared\_ValidationScriptsPartial.cshtml" />
+      <_ContentIncludedByDefault Remove="Views\_ViewImports.cshtml" />
+      <_ContentIncludedByDefault Remove="Views\_ViewStart.cshtml" />
+    </ItemGroup>
+
+    <ItemGroup>
+      <PackageReference Include="MailKit" Version="4.15.0" />
+      <PackageReference Include="Microsoft.AspNetCore.Authentication.JwtBearer" Version="9.0.13" />
+      <PackageReference Include="Microsoft.EntityFrameworkCore" Version="9.0.13" />
+      <PackageReference Include="Microsoft.EntityFrameworkCore.Design" Version="9.0.13">
+        <PrivateAssets>all</PrivateAssets>
+        <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+      </PackageReference>
+      <PackageReference Include="Microsoft.EntityFrameworkCore.Relational" Version="9.0.13" />
+      <PackageReference Include="Microsoft.EntityFrameworkCore.Tools" Version="9.0.13">
+        <PrivateAssets>all</PrivateAssets>
+        <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+      </PackageReference>
+      <PackageReference Include="Microsoft.Extensions.Configuration" Version="9.0.13" />
+      <PackageReference Include="Microsoft.IdentityModel.Tokens" Version="8.16.0" />
+      <PackageReference Include="MimeKit" Version="4.15.0" />
+      <PackageReference Include="Newtonsoft.Json" Version="13.0.4" />
+      <PackageReference Include="Npgsql.EntityFrameworkCore.PostgreSQL" Version="9.0.4" />
+      <PackageReference Include="Swashbuckle.AspNetCore" Version="10.1.4" />
+      <PackageReference Include="Swashbuckle.AspNetCore.Swagger" Version="10.1.4" />
+      <PackageReference Include="Swashbuckle.AspNetCore.SwaggerGen" Version="10.1.4" />
+      <PackageReference Include="Swashbuckle.AspNetCore.SwaggerUI" Version="10.1.4" />
+      <PackageReference Include="System.IdentityModel.Tokens.Jwt" Version="8.16.0" />
+    </ItemGroup>
+
+    <ItemGroup>
+      <ProjectReference Include="..\PptSecrets.Core\PptSecrets.Core.csproj" />
+      <ProjectReference Include="..\PptSecrets.DataAccess\PptSecrets.DataAccess.csproj" />
+    </ItemGroup>
+
+</Project>
+
+
+// PptSecrets/Program.cs
+using Microsoft.AspNetCore.Authentication.JwtBearer;
+using Microsoft.IdentityModel.Tokens;
+using System.Text;
+using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.FileProviders;
+using Microsoft.OpenApi;
+using PptSecrets.Core.Entities;
+using PptSecrets.Core.Interfaces;
+using PptSecrets.Core.Services;
+using PptSecrets.DataAccess;
+using PptSecrets.DataAccess.Repository;
+
+var builder = WebApplication.CreateBuilder(args);
+
+var connectionString = builder.Configuration.GetConnectionString("DefaultConnection") 
+                       ?? Environment.GetEnvironmentVariable("ConnectionStrings__DefaultConnection")
+                       ?? Environment.GetEnvironmentVariable("DATABASE_URL");
+
+if (!string.IsNullOrEmpty(connectionString) && 
+    (connectionString.StartsWith("postgres://") || connectionString.StartsWith("postgresql://")))
+{
+    // Приводим к единому стандарту для Uri
+    var uriString = connectionString.Replace("postgresql://", "postgres://");
+    var databaseUri = new Uri(uriString);
+    var userInfo = databaseUri.UserInfo.Split(':');
+
+    // Собираем строку в формате Npgsql
+    // Если порт не указан в URI (databaseUri.Port < 0), ставим стандартный 5432
+    var host = databaseUri.Host;
+    var port = databaseUri.Port > 0 ? databaseUri.Port : 5432;
+    var database = databaseUri.LocalPath.TrimStart('/');
+    var username = userInfo[0];
+    var password = userInfo.Length > 1 ? userInfo[1] : "";
+
+    connectionString = $"Host={host};Port={port};Database={database};Username={username};Password={password};SSL Mode=Require;Trust Server Certificate=true;";
+}
+
+// Теперь Npgsql получит строку в формате: Host=dpg-d6ru...;Port=5432;Database=...
+builder.Services.AddDbContext<PptDbContext>(options =>
+    options.UseNpgsql(connectionString));
+
+var supportedCultures = new[] { "en-US" };
+var localizationOptions = new RequestLocalizationOptions()
+    .SetDefaultCulture(supportedCultures[0])
+    .AddSupportedCultures(supportedCultures)
+    .AddSupportedUICultures(supportedCultures);
+
+builder.Services.AddScoped<IUserService, UserService>();
+builder.Services.AddScoped<IPptService, PptService>();
+builder.Services.AddScoped<IUnitOfWork, UnitOfWork>();
+builder.Services.AddScoped<IEmailVerificationService, EmailVerificationService>();
+builder.Services.AddHttpClient<IYooKassaService, YooKassaService>(); 
+builder.Services.AddScoped<IYooKassaService, YooKassaService>();
+
+builder.Services.AddControllers();
+builder.Services.AddEndpointsApiExplorer();
+builder.Services.AddSwaggerGen(c => {
+    c.AddSecurityDefinition("Bearer", new OpenApiSecurityScheme {
+        In = ParameterLocation.Header, Description = "JWT Token", Name = "Authorization", Type = SecuritySchemeType.Http, Scheme = "bearer"
+    });
+   
+});
+
+builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
+    .AddJwtBearer(options => {
+        options.TokenValidationParameters = new TokenValidationParameters {
+            ValidateIssuer = true, ValidateAudience = true, ValidateLifetime = true, ValidateIssuerSigningKey = true,
+            ValidIssuer = builder.Configuration["Jwt:Issuer"], ValidAudience = builder.Configuration["Jwt:Audience"],
+            IssuerSigningKey = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(builder.Configuration["Jwt:Key"]!))
+        };
+    });
+
+var ip = builder.Configuration["Frontip"]; 
+var allowedOrigin = string.IsNullOrEmpty(ip) ? "http://localhost:3000" : ip;
+
+builder.Services.AddCors(o => o.AddPolicy("FrontendPolicy", b => 
+    b.WithOrigins(allowedOrigin)
+        .AllowAnyMethod()
+        .AllowAnyHeader()
+        .AllowCredentials()));
+
+var app = builder.Build();
+
+using (var scope = app.Services.CreateScope())
+{
+    var db = scope.ServiceProvider.GetRequiredService<PptDbContext>();
+    db.Database.EnsureCreated();
+
+    if (db.Users.Count() < 0)
+    {
+        var user = new User
+        {
+            Email = "15012010d@gmail.com",
+            PasswordHash = UserService.HashPassword("Pass1234!!!"),
+            Role = "Admin"
+        };
+        db.Users.Add(user);
+    }
+}
+
+app.UseCors("FrontendPolicy");
+
+app.UseRequestLocalization(localizationOptions);
+
+var imagesPath = Path.Combine(builder.Environment.ContentRootPath, "images");
+var presPath = Path.Combine(builder.Environment.ContentRootPath, "presentations");
+
+if (!Directory.Exists(imagesPath))
+{
+    Directory.CreateDirectory(imagesPath);
+    Console.WriteLine($"Directory created: {imagesPath}");
+}
+if (!Directory.Exists(presPath))
+{
+    Directory.CreateDirectory(presPath);
+    Console.WriteLine($"Directory created: {presPath}");
+}
+
+app.UseStaticFiles(new StaticFileOptions
+{
+    FileProvider = new PhysicalFileProvider(imagesPath),
+    RequestPath = "/images"
+});
+
+app.UseStaticFiles(new StaticFileOptions
+{
+    FileProvider = new PhysicalFileProvider(presPath),
+    RequestPath = "/presentations"
+});
+
+app.UseMiddleware<PptSecrets.ExceptionHandler.ExceptionHandlerMiddleware>();
+
+app.UseStaticFiles();
+
+if (app.Environment.IsDevelopment())
+{
+    app.UseSwagger();
+    app.UseSwaggerUI();
+}
+
+app.UseAuthentication();
+app.UseAuthorization();
+app.MapControllers();
+
+app.Run();
+
+// PptSecrets/obj/Debug/net9.0/.NETCoreApp,Version=v9.0.AssemblyAttributes.cs
+// <autogenerated />
+using System;
+using System.Reflection;
+[assembly: global::System.Runtime.Versioning.TargetFrameworkAttribute(".NETCoreApp,Version=v9.0", FrameworkDisplayName = ".NET 9.0")]
+
+
+// PptSecrets/obj/Debug/net9.0/PptSecrets.AssemblyInfo.cs
+//------------------------------------------------------------------------------
+// <auto-generated>
+//     This code was generated by a tool.
+//
+//     Changes to this file may cause incorrect behavior and will be lost if
+//     the code is regenerated.
+// </auto-generated>
+//------------------------------------------------------------------------------
+
+using System;
+using System.Reflection;
+
+[assembly: System.Reflection.AssemblyCompanyAttribute("PptSecrets")]
+[assembly: System.Reflection.AssemblyConfigurationAttribute("Debug")]
+[assembly: System.Reflection.AssemblyFileVersionAttribute("1.0.0.0")]
+[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+3a7685590db4d162e86203f5f7d7190a32a4ff7d")]
+[assembly: System.Reflection.AssemblyProductAttribute("PptSecrets")]
+[assembly: System.Reflection.AssemblyTitleAttribute("PptSecrets")]
+[assembly: System.Reflection.AssemblyVersionAttribute("1.0.0.0")]
+
+// Создано классом WriteCodeFragment MSBuild.
+
+
+
+// PptSecrets/obj/Debug/net9.0/PptSecrets.GlobalUsings.g.cs
+// <auto-generated/>
+global using global::Microsoft.AspNetCore.Builder;
+global using global::Microsoft.AspNetCore.Hosting;
+global using global::Microsoft.AspNetCore.Http;
+global using global::Microsoft.AspNetCore.Routing;
+global using global::Microsoft.Extensions.Configuration;
+global using global::Microsoft.Extensions.DependencyInjection;
+global using global::Microsoft.Extensions.Hosting;
+global using global::Microsoft.Extensions.Logging;
+global using global::System;
+global using global::System.Collections.Generic;
+global using global::System.IO;
+global using global::System.Linq;
+global using global::System.Net.Http;
+global using global::System.Net.Http.Json;
+global using global::System.Threading;
+global using global::System.Threading.Tasks;
+
+
+// PptSecrets/obj/Debug/net9.0/PptSecrets.MvcApplicationPartsAssemblyInfo.cs
+//------------------------------------------------------------------------------
+// <auto-generated>
+//     This code was generated by a tool.
+//
+//     Changes to this file may cause incorrect behavior and will be lost if
+//     the code is regenerated.
+// </auto-generated>
+//------------------------------------------------------------------------------
+
+using System;
+using System.Reflection;
+
+[assembly: Microsoft.AspNetCore.Mvc.ApplicationParts.ApplicationPartAttribute("Swashbuckle.AspNetCore.SwaggerGen")]
+
+// Создано классом WriteCodeFragment MSBuild.
+
+
+
+// PptSecrets/obj/Debug/net9.0/PptSecrets.RazorAssemblyInfo.cs
+//------------------------------------------------------------------------------
+// <auto-generated>
+//     This code was generated by a tool.
+//
+//     Changes to this file may cause incorrect behavior and will be lost if
+//     the code is regenerated.
+// </auto-generated>
+//------------------------------------------------------------------------------
+
+using System;
+using System.Reflection;
+
+[assembly: Microsoft.AspNetCore.Mvc.ApplicationParts.ProvideApplicationPartFactoryAttribute(("Microsoft.AspNetCore.Mvc.ApplicationParts.ConsolidatedAssemblyApplicationPartFact" +
+    "ory, Microsoft.AspNetCore.Mvc.Razor"))]
+
+// Создано классом WriteCodeFragment MSBuild.
+
+
+
+// PptSecrets.Core/Entities/EmailVerification.cs
+namespace PptSecrets.Core.Entities;
+
+public class EmailVerification
+{
+    public Guid Id { get; set; }
+    public string Email { get; set; } = null!;
+    public string Code { get; set; } = null!;
+    public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
+    public DateTime ExpiresAt { get; set; }
+}
+
+// PptSecrets.Core/Entities/PaymentTransaction.cs
+namespace PptSecrets.Core.Entities;
+
+public class PaymentTransaction
+{
+    public Guid Id { get; set; }
+    public string YooKassaPaymentId { get; set; } = string.Empty;
+    public string UserEmail { get; set; } = string.Empty;
+    public string PptIds { get; set; } = string.Empty;
+    public string Status { get; set; } = "pending";
+    public float Amount { get; set; }
+    public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
+}
+
+// PptSecrets.Core/Entities/Ppt.cs
+using System.ComponentModel.DataAnnotations.Schema;
+
+namespace PptSecrets.Core.Entities;
+
+public class Ppt
+{
+    public Guid Id { get; set; }
+    public string Name { get; set; } = "";
+    public string DescriptionRu { get; set; } = "";
+    public string DescriptionEn { get; set; } = "";
+    public string ShortDescriptionRu { get; set; } = "";
+    public string ShortDescriptionEn { get; set; } = "";
+    public string Path { get; set; } = "";
+    public uint Bought { get; set; }
+    public float Price { get; set; }
+
+    [NotMapped]
+    public List<string> Images { get; set; } = new();
+}
+
+// PptSecrets.Core/Entities/User.cs
+namespace PptSecrets.Core.Entities;
+
+public class User
+{
+    public Guid Id { get; set; }
+    public string Email { get; set; } = null!;
+    public string PasswordHash { get; set; } = null!;
+    public string Role { get; set; } = "User";
+    public DateTime CreatedAt { get; set; }
+}
+
+// PptSecrets.Core/Entities/UserPpts.cs
+using Microsoft.EntityFrameworkCore;
+
+namespace PptSecrets.Core.Entities;
+
+[PrimaryKey("Id")]
+public class UserPpts
+{
+    public Guid Id { get; set; }
+    public Guid User { get; set; }
+    public Guid Ppt { get; set; }
+}
+
+// PptSecrets.Core/Interfaces/IEmailVerificationRepository.cs
+
+using PptSecrets.Core.Entities;
+
+namespace PptSecrets.Core.Interfaces;
+
+public interface IEmailVerificationRepository : IRepositoryBase<EmailVerification>
+{
+    Task<EmailVerification?> GetLatestByEmailAsync(string email);
+}
+
+// PptSecrets.Core/Interfaces/IPaymentTransactionRepository.cs
+using PptSecrets.Core.Entities;
+
+namespace PptSecrets.Core.Interfaces;
+
+public interface IPaymentTransactionRepository : IRepositoryBase<PaymentTransaction>
+{
+    Task<PaymentTransaction?> GetByPaymentIdAsync(string paymentId);
+}
+
+// PptSecrets.Core/Interfaces/IPptRepository.cs
+using PptSecrets.Core.Entities;
+
+namespace PptSecrets.Core.Interfaces;
+
+public interface IPptRepository : IRepositoryBase<Ppt>
+{
+}
+
+// PptSecrets.Core/Interfaces/IRepositoryBase.cs
+namespace PptSecrets.Core.Interfaces;
+
+public interface IRepositoryBase<T> where T : class
+{
+    Task<IEnumerable<T>> GetAllAsync();
+    Task<T?> GetByIdAsync(Guid id);
+    Task AddAsync(T entity);
+    void Remove(T entity);
+    void Update(T entity);
+}
+
+// PptSecrets.Core/Interfaces/IUnitOfWork.cs
+namespace PptSecrets.Core.Interfaces;
+
+public interface IUnitOfWork : IDisposable
+{
+    IUserRepository Users { get; }
+    IPptRepository Ppts { get; }
+    IUserPptsRepository UserPpts { get; }
+    IEmailVerificationRepository EmailVerifications { get; }
+    IPaymentTransactionRepository PaymentTransactions { get; }
+    Task<int> SaveChangesAsync();
+}
+
+// PptSecrets.Core/Interfaces/IUserPptsRepository.cs
+using PptSecrets.Core.Entities;
+
+namespace PptSecrets.Core.Interfaces;
+
+public interface IUserPptsRepository : IRepositoryBase<UserPpts>
+{
+    Task<bool> findByUserPptId(Guid userId, Guid pptId);
+}
+
+// PptSecrets.Core/Interfaces/IUserRepository.cs
+using PptSecrets.Core.Entities;
+
+namespace PptSecrets.Core.Interfaces;
+
+public interface IUserRepository : IRepositoryBase<User>
+{
+    Task<User?> GetByEmailAsync(string email);
+}
+
+// PptSecrets.Core/Models/Language.cs
+namespace PptSecrets.Core.Models;
+
+
+public enum Language
+{
+    Ru,
+    En
+}
+
+// PptSecrets.Core/PptSecrets.Core.csproj
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+    <PropertyGroup>
+        <TargetFramework>net9.0</TargetFramework>
+        <ImplicitUsings>enable</ImplicitUsings>
+        <Nullable>enable</Nullable>
+    </PropertyGroup>
+
+    <ItemGroup>
+      <PackageReference Include="MailKit" Version="4.15.0" />
+      <PackageReference Include="Microsoft.AspNetCore.Authentication.JwtBearer" Version="9.0.13" />
+      <PackageReference Include="Microsoft.EntityFrameworkCore" Version="9.0.13" />
+      <PackageReference Include="Microsoft.EntityFrameworkCore.Design" Version="9.0.13">
+        <PrivateAssets>all</PrivateAssets>
+        <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+      </PackageReference>
+      <PackageReference Include="Microsoft.EntityFrameworkCore.Relational" Version="9.0.13" />
+      <PackageReference Include="Microsoft.EntityFrameworkCore.Tools" Version="9.0.13">
+        <PrivateAssets>all</PrivateAssets>
+        <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+      </PackageReference>
+      <PackageReference Include="Microsoft.Extensions.Configuration" Version="9.0.13" />
+      <PackageReference Include="MimeKit" Version="4.15.0" />
+      <PackageReference Include="Newtonsoft.Json" Version="13.0.4" />
+      <PackageReference Include="Npgsql.EntityFrameworkCore.PostgreSQL" Version="9.0.4" />
+    </ItemGroup>
+
+</Project>
+
+
+// PptSecrets.Core/Services/EmailVerificationService.cs
+using MailKit.Net.Smtp;
+using MailKit.Security;
+using Microsoft.Extensions.Configuration;
+using MimeKit;
+using MimeKit.Text;
+using PptSecrets.Core.Entities;
+using PptSecrets.Core.Interfaces;
+using PptSecrets.Core.Models;
+
+namespace PptSecrets.Core.Services;
+
+public class EmailVerificationService : IEmailVerificationService
+{
+    private readonly IConfiguration _config;
+    private readonly IUnitOfWork _uow;
+
+    public EmailVerificationService(IConfiguration config, IUnitOfWork uow)
+    {
+        _config = config;
+        _uow = uow;
+    }
+
+    public async Task SendVerificationCodeAsync(string email, Language lang)
+    {
+        var code = GenerateRandomCode(6);
+
+        var existing = await _uow.EmailVerifications.GetAllAsync(); 
+        var oldCodes = existing.Where(x => x.Email == email);
+        foreach(var old in oldCodes) _uow.EmailVerifications.Remove(old);
+
+        await _uow.EmailVerifications.AddAsync(new EmailVerification
+        {
+            Email = email,
+            Code = code,
+            ExpiresAt = DateTime.UtcNow.AddMinutes(10)
+        });
+        await _uow.SaveChangesAsync();
+
+        var message = new MimeMessage();
+        message.From.Add(new MailboxAddress("PptSecrets Support", _config["Email:SmtpUser"]));
+        message.To.Add(new MailboxAddress("", email));
+
+        if (lang == Language.Ru)
+        {
+            message.Subject = "Ваш код подтверждения";
+            message.Body = new TextPart(TextFormat.Html) { Text = GetHtmlTemplate("Используйте этот код для верификации:", code, "Код действителен 10 минут.") };
+        }
+        else
+        {
+            message.Subject = "Your Verification Code";
+            message.Body = new TextPart(TextFormat.Html) { Text = GetHtmlTemplate("Use this code for verification:", code, "Code is valid for 10 minutes.") };
+        }
+
+        using var client = new SmtpClient();
+        await client.ConnectAsync(_config["Email:SmtpHost"], int.Parse(_config["Email:SmtpPort"]!), SecureSocketOptions.StartTls);
+        await client.AuthenticateAsync(_config["Email:SmtpUser"], _config["Email:SmtpPass"]);
+        await client.SendAsync(message);
+        await client.DisconnectAsync(true);
+    }
+
+    private string GetHtmlTemplate(string title, string code, string footer) => 
+        $@"<div style='font-family: sans-serif; padding: 20px;'>
+        <h2>PptSecrets</h2>
+        <p>{title}</p>
+        <div style='font-size: 24px; font-weight: bold; background: #f1f5f9; padding: 10px; display: inline-block;'>{code}</div>
+        <p style='color: gray;'>{footer}</p>
+    </div>";
+
+    public async Task<bool> VerifyCodeAsync(string email, string code)
+    {
+        var record = await _uow.EmailVerifications.GetLatestByEmailAsync(email);
+
+        if (record == null || record.Code != code || record.ExpiresAt < DateTime.UtcNow)
+        {
+            return false;
+        }
+
+        _uow.EmailVerifications.Remove(record);
+        await _uow.SaveChangesAsync();
+
+        return true;
+    }
+    
+
+    private string GenerateRandomCode(int length)
+    {
+        const string chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+        var random = new Random();
+        return new string(Enumerable.Repeat(chars, length)
+            .Select(s => s[random.Next(s.Length)]).ToArray());
+    }
+}
+
+// PptSecrets.Core/Services/IEmailVerificationService.cs
+using PptSecrets.Core.Models;
+
+namespace PptSecrets.Core.Services;
+
+public interface IEmailVerificationService
+{
+    Task SendVerificationCodeAsync(string email, Language lang);
+    Task<bool> VerifyCodeAsync(string email, string code);
+}
+
+// PptSecrets.Core/Services/IPptService.cs
+using PptSecrets.Core.Entities;
+
+namespace PptSecrets.Core.Services;
+
+public interface IPptService
+{
+    Task<IEnumerable<Ppt>> GetAllAsync();
+    Task<Ppt?> GetByIdAsync(Guid id);
+    Task<Ppt> CreateAsync(string name, string fileName, string descRu, string sDescRu, string descEn, string sDescEn, float price, Stream fileStream, IEnumerable<(string FileName, Stream Stream)> images);
+    Task<Ppt?> UpdateAsync(Guid id, string name, string? fileName, string? descRu, string? sDescRu, string? descEn, string? sDescEn, Stream? fileStream, List<(string FileName, Stream Stream)> imageStreams, float price = 0F);
+    Task<bool> DeleteAsync(Guid id);
+    Task ProcessMultiplePurchasesAsync(List<Guid> pptIds, string userEmail);
+    Task<(Stream stream, string contentType, string fileName)> GetPptFileAsync(Guid id);
+}
+
+// PptSecrets.Core/Services/IUserService.cs
+using PptSecrets.Core.Entities;
+using PptSecrets.Core.Models;
+
+namespace PptSecrets.Core.Services;
+
+public interface IUserService
+{
+    Task<User?> GetByIdAsync(Guid id);
+    Task<User?> GetByEmailAsync(string email);
+
+    Task<bool> findPermission(string userEmail, Guid pptId);
+    
+    Task RegisterAsync(string email, Language lang);
+    Task<User> VerifyEmailAsync(string email, string password, string code, string role = "User");
+
+    Task<string?> AuthenticateAsync(string email, string password);
+}
+
+// PptSecrets.Core/Services/IYooKassaService.cs
+namespace PptSecrets.Core.Services;
+
+public interface IYooKassaService
+{
+    Task<string> CreatePaymentAsync(float amount, string description, string returnUrl, Guid transactionId);
+}
+
+// PptSecrets.Core/Services/PptService.cs
+using Microsoft.Extensions.Configuration;
+using MailKit.Net.Smtp;
+using MailKit.Security;
+using MimeKit;
+using PptSecrets.Core.Entities;
+using PptSecrets.Core.Interfaces;
+
+namespace PptSecrets.Core.Services;
+
+public class PptService : IPptService
+{
+    private readonly IUnitOfWork _uow;
+    private readonly IConfiguration _config;
+    private readonly string _pptFolderPath;
+    private readonly string _imagesFolderPath;
+    private readonly string[] _allowedPptExtensions = { ".ppt", ".pptx", ".pptm", ".ppsx" };
+    private readonly string[] _allowedImageExtensions = { ".jpg", ".jpeg", ".png" };
+
+    public PptService(IUnitOfWork uow, IConfiguration config)
+    {
+        _uow = uow;
+        _config = config;
+        var currentDir = Directory.GetCurrentDirectory();
+        
+        _pptFolderPath = Path.Combine(currentDir, "presentations");
+        _imagesFolderPath = Path.Combine(currentDir, "images");
+        
+        if (!Directory.Exists(_pptFolderPath)) Directory.CreateDirectory(_pptFolderPath);
+        if (!Directory.Exists(_imagesFolderPath)) Directory.CreateDirectory(_imagesFolderPath);
+    }
+
+    public async Task<IEnumerable<Ppt>> GetAllAsync()
+    {
+        var ppts = (await _uow.Ppts.GetAllAsync()).ToList();
+        foreach (var ppt in ppts)
+        {
+            LoadImages(ppt);
+        }
+        return ppts;
+    }
+
+    public async Task<Ppt?> GetByIdAsync(Guid id)
+    {
+        var ppt = await _uow.Ppts.GetByIdAsync(id);
+        if (ppt != null)
+        {
+            LoadImages(ppt);
+        }
+        return ppt;
+    }
+
+    public async Task<Ppt> CreateAsync(string name, string fileName, string descRu, string sDescRu, string descEn, string sDescEn, float price, Stream fileStream, IEnumerable<(string FileName, Stream Stream)> images)
+    {
+        var savedPath = await SaveFileLocallyAsync(fileName, fileStream, _pptFolderPath, _allowedPptExtensions, "presentations");
+        var ppt = new Ppt { Name = name, Path = savedPath, DescriptionRu = descRu, ShortDescriptionRu = sDescRu, DescriptionEn = descEn, ShortDescriptionEn = sDescEn, Price = price, Bought = 0 };
+        
+        await SaveImagesAsync(name, images);
+
+        await _uow.Ppts.AddAsync(ppt);
+        await _uow.SaveChangesAsync();
+        
+        LoadImages(ppt);
+        return ppt;
+    }
+
+    public async Task<Ppt?> UpdateAsync(Guid id, string name, string? fileName, string? descRu, string? sDescRu, string? descEn, string? sDescEn, Stream? fileStream, List<(string FileName, Stream Stream)> imageStreams, float price = 0)
+    {
+        var ppt = await _uow.Ppts.GetByIdAsync(id);
+        if (ppt == null) return null;
+
+        if (ppt.Name != name)
+        {
+            var oldImgDir = Path.Combine(_imagesFolderPath, ppt.Name);
+            var newImgDir = Path.Combine(_imagesFolderPath, name);
+            if (Directory.Exists(oldImgDir) && !Directory.Exists(newImgDir))
+            {
+                Directory.Move(oldImgDir, newImgDir);
+            }
+            ppt.Name = name;
+        }
+
+        if (descRu != null)
+        {
+            ppt.DescriptionRu = descRu;
+        }
+        
+        if (sDescRu != null)
+        {
+            ppt.ShortDescriptionRu = sDescRu;
+        }
+        
+        if (descEn != null)
+        {
+            ppt.DescriptionEn = descEn;
+        }
+        
+        if (sDescEn != null)
+        {
+            ppt.ShortDescriptionEn = sDescEn;
+        }
+        
+        if (price != 0)
+        {
+            ppt.Price = price;
+        }
+
+        if (fileStream != null && !string.IsNullOrEmpty(fileName))
+        {
+            DeleteLocalFile(ppt.Path, _pptFolderPath);
+            ppt.Path = await SaveFileLocallyAsync(fileName, fileStream, _pptFolderPath, _allowedPptExtensions, "presentations");
+        }
+        
+        LoadImages(ppt);
+
+        foreach (var image in ppt.Images)
+        {
+            var imgDir = Path.Combine(_imagesFolderPath, ppt.Name);
+            DeleteLocalFile(image, imgDir);
+        }
+
+        ppt.Images = new List<string>();
+        
+        await SaveImagesAsync(name, imageStreams);
+
+        _uow.Ppts.Update(ppt);
+        await _uow.SaveChangesAsync();
+        
+        LoadImages(ppt);
+        return ppt;
+    }
+
+    public async Task<bool> DeleteAsync(Guid id)
+    {
+        var ppt = await _uow.Ppts.GetByIdAsync(id);
+        if (ppt == null) return false;
+
+        DeleteLocalFile(ppt.Path, _pptFolderPath);
+        
+        var imgDir = Path.Combine(_imagesFolderPath, ppt.Name);
+        if (Directory.Exists(imgDir))
+        {
+            Directory.Delete(imgDir, true);
+        }
+
+        _uow.Ppts.Remove(ppt);
+        await _uow.SaveChangesAsync();
+        return true;
+    }
+    
+    private async Task SaveImagesAsync(string pptName, IEnumerable<(string FileName, Stream Stream)> images)
+    {
+        if (images == null || !images.Any()) return;
+
+        var targetDir = Path.Combine(_imagesFolderPath, pptName);
+        if (!Directory.Exists(targetDir)) Directory.CreateDirectory(targetDir);
+
+        foreach (var img in images)
+        {
+            await SaveFileLocallyAsync(img.FileName, img.Stream, targetDir, _allowedImageExtensions, $"images/{pptName}");
+        }
+    }
+
+    private async Task<string> SaveFileLocallyAsync(string fileName, Stream stream, string targetFolderPath, string[] allowedExtensions, string relativeFolder)
+    {
+        var ext = Path.GetExtension(fileName).ToLower();
+        if (!allowedExtensions.Contains(ext)) 
+            throw new Exception($"Extension {ext} not allowed.");
+
+        var newName = $"{Path.GetFileNameWithoutExtension(fileName)}_{Guid.NewGuid()}{ext}";
+        var fullPath = Path.Combine(targetFolderPath, newName);
+
+        using var fs = new FileStream(fullPath, FileMode.Create);
+        await stream.CopyToAsync(fs);
+
+        return $"./{relativeFolder}/{newName}";
+    }
+
+    private void DeleteLocalFile(string relativePath, string baseFolder)
+    {
+        if (string.IsNullOrEmpty(relativePath)) return;
+        var fileName = Path.GetFileName(relativePath);
+        var fullPath = Path.Combine(baseFolder, fileName);
+        if (File.Exists(fullPath)) File.Delete(fullPath);
+    }
+
+    private void LoadImages(Ppt ppt)
+    {
+        var folder = Path.Combine(_imagesFolderPath, ppt.Name);
+        if (Directory.Exists(folder))
+        {
+            var files = Directory.GetFiles(folder);
+            ppt.Images = files.Select(f => $"./images/{ppt.Name}/{Path.GetFileName(f)}").ToList();
+        }
+        else
+        {
+            ppt.Images = new List<string>();
+        }
+    }
+
+    public async Task ProcessMultiplePurchasesAsync(List<Guid> pptIds, string userEmail)
+    {
+        var ppts = new List<Ppt>();
+        var user = await _uow.Users.GetByEmailAsync(userEmail);
+        foreach (var id in pptIds)
+        {
+            var ppt = await _uow.Ppts.GetByIdAsync(id);
+            
+            ppt.Bought++;
+            
+            _uow.Ppts.Update(ppt);
+
+            var userPpts = new UserPpts { User = user!.Id, Ppt = ppt.Id };
+
+            if(!(await _uow.UserPpts.findByUserPptId(userPpts.User, userPpts.Ppt)))
+                await _uow.UserPpts.AddAsync(userPpts);
+            
+            ppts.Add(ppt);
+        }
+
+        await SendSingleSuccessEmailAsync(userEmail, ppts);
+
+        await _uow.SaveChangesAsync();
+    }
+
+    private async Task SendSingleSuccessEmailAsync(string userEmail, List<Ppt> ppts)
+    {
+        var smtpHost = _config["Email:SmtpHost"];
+        var smtpPort = int.Parse(_config["Email:SmtpPort"]!);
+        var smtpUser = _config["Email:SmtpUser"];
+        var smtpPass = _config["Email:SmtpPass"];
+        var ownerEmail = _config["Email:OwnerEmail"];
+        var baseUrl = _config["BaseUrl"];
+    
+        var message = new MimeMessage();
+        message.From.Add(new MailboxAddress("PptSecrets", smtpUser));
+        message.To.Add(new MailboxAddress("", userEmail));
+        message.Subject = "Ваши купленные презентации";
+
+        var ownerPpts = "";
+        
+        var bodyText = "Спасибо за покупку! Вот ссылки на ваши файлы:\n\n";
+        foreach (var ppt in ppts)
+        {
+            bodyText += $"- {ppt.Name}: {baseUrl}/api/ppt/download/{ppt.Id}\n";
+            ownerPpts += $"{ppt.Name}, ";
+        }
+
+        message.Body = new TextPart("plain") { Text = bodyText };
+
+        using var client = new SmtpClient();
+        await client.ConnectAsync(smtpHost, smtpPort, SecureSocketOptions.StartTls);
+        await client.AuthenticateAsync(smtpUser, smtpPass);
+        
+        await client.SendAsync(message);
+
+        
+        if (!string.IsNullOrEmpty(ownerEmail))
+        {
+            var ownerMessage = new MimeMessage();
+            ownerMessage.From.Add(new MailboxAddress("PptSecrets System", smtpUser));
+            ownerMessage.To.Add(new MailboxAddress("Owner", ownerEmail));
+            ownerMessage.Subject = "Новая покупка презентации!";
+            ownerMessage.Body = new TextPart("plain")
+            {
+                Text = $"Пользователь {userEmail} приобрел \"{ownerPpts}\"\n" +
+                       $"Файл успешно доставлен."
+            };
+            await client.SendAsync(ownerMessage);
+        }
+
+        await client.DisconnectAsync(true);
+    }
+    
+    public async Task<(Stream stream, string contentType, string fileName)> GetPptFileAsync(Guid id)
+    {
+        var ppt = await _uow.Ppts.GetByIdAsync(id);
+        if (ppt == null) throw new Exception("Презентация не найдена");
+
+        // Формируем полный путь к файлу. 
+        // В вашем проекте файлы хранятся в папке "presentations"
+        var fileName = Path.GetFileName(ppt.Path);
+        var filePath = Path.Combine(_pptFolderPath, fileName);
+
+        if (!File.Exists(filePath)) throw new Exception("Файл не найден на сервере");
+
+        var stream = new FileStream(filePath, FileMode.Open, FileAccess.Read);
+    
+        // Стандартный MIME-тип для презентаций или универсальный
+        var contentType = "application/vnd.openxmlformats-officedocument.presentationml.presentation"; 
+    
+        return (stream, contentType, ppt.Name + Path.GetExtension(fileName));
+    }
+}
+
+// PptSecrets.Core/Services/UserService.cs
+using System.Security.Claims;
+using System.Security.Cryptography;
+using System.Text;
+using Microsoft.Extensions.Configuration;
+using Microsoft.IdentityModel.Tokens;
+using System.IdentityModel.Tokens.Jwt;
+using PptSecrets.Core.Entities;
+using PptSecrets.Core.Interfaces;
+using PptSecrets.Core.Models;
+
+namespace PptSecrets.Core.Services;
+
+public class UserService : IUserService
+{
+    private readonly IUnitOfWork _uow;
+    private readonly IConfiguration _configuration;
+    private readonly IEmailVerificationService _emailVerificationService;
+
+    public UserService(IUnitOfWork uow, IEmailVerificationService emailVerificationService, IConfiguration configuration)
+    {
+        _uow = uow;
+        _emailVerificationService = emailVerificationService;
+        _configuration = configuration;
+    }
+
+    public async Task<User?> GetByIdAsync(Guid id) => await _uow.Users.GetByIdAsync(id);
+
+    public async Task<User?> GetByEmailAsync(string email) => await _uow.Users.GetByEmailAsync(email);
+
+    public async Task RegisterAsync(string email, Language lang)
+    {
+        var existingUser = await _uow.Users.GetByEmailAsync(email);
+        if (existingUser != null) throw new Exception("User already exists");
+
+        await SendEmailCode(email, lang);
+    }
+
+    public async Task<User> VerifyEmailAsync(string email, string password, string code, string role = "User")
+    {
+        var res = await _emailVerificationService.VerifyCodeAsync(email, code);
+
+        if (!res)
+        {
+            throw new Exception("Code is not valid");
+        }
+        
+        var user = new User
+        {
+            Email = email,
+            PasswordHash = HashPassword(password),
+            Role = role,
+            CreatedAt = DateTime.UtcNow
+        };
+
+        await _uow.Users.AddAsync(user);
+        await _uow.SaveChangesAsync();
+
+        await AuthenticateAsync(user.Email, user.PasswordHash);
+        
+        return user;
+    }
+
+    public async Task<string?> AuthenticateAsync(string email, string password)
+    {
+        var user = await _uow.Users.GetByEmailAsync(email);
+        if (user == null || user.PasswordHash != HashPassword(password))
+            return null;
+
+        return GenerateJwtToken(user);
+    }
+
+    public static string HashPassword(string password)
+    {
+        using var sha256 = SHA256.Create();
+        var bytes = sha256.ComputeHash(Encoding.UTF8.GetBytes(password));
+        return Convert.ToBase64String(bytes);
+    }
+
+    private string GenerateJwtToken(User user)
+    {
+        var claims = new[]
+        {
+            new Claim(ClaimTypes.NameIdentifier, user.Id.ToString()),
+            new Claim(ClaimTypes.Email, user.Email),
+            new Claim(ClaimTypes.Role, user.Role)
+        };
+
+        var key = new SymmetricSecurityKey(
+            Encoding.UTF8.GetBytes(_configuration["Jwt:Key"]!)
+        );
+
+        var creds = new SigningCredentials(key, SecurityAlgorithms.HmacSha256);
+
+        var token = new JwtSecurityToken(
+            _configuration["Jwt:Issuer"],
+            _configuration["Jwt:Audience"],
+            claims,
+            expires: DateTime.UtcNow.AddDays(7),
+            signingCredentials: creds
+        );
+
+        return new JwtSecurityTokenHandler().WriteToken(token);
+    }
+
+    private async Task SendEmailCode(string email, Language lang)
+    {
+        await _emailVerificationService.SendVerificationCodeAsync(email, lang);
+        await Task.CompletedTask;
+    }
+
+    public async Task<bool> findPermission(string userEmail, Guid pptId)
+    {
+        var user = await _uow.Users.GetByEmailAsync(userEmail);
+
+        return await _uow.UserPpts.findByUserPptId(user!.Id, pptId);
+    }
+}
+
+// PptSecrets.Core/Services/YooKassaService.cs
+using System.Net.Http.Headers;
+using System.Text;
+using Microsoft.Extensions.Configuration;
+using Newtonsoft.Json;
+
+namespace PptSecrets.Core.Services;
+
+public class YooKassaService : IYooKassaService
+{
+    private readonly HttpClient _httpClient;
+    private readonly IConfiguration _config;
+
+    public YooKassaService(HttpClient httpClient, IConfiguration config)
+    {
+        _httpClient = httpClient;
+        _config = config;
+    }
+
+    public async Task<string> CreatePaymentAsync(float amount, string description, string returnUrl, Guid transactionId)
+    {
+        var shopId = _config["YooKassa:ShopId"];
+        var secretKey = _config["YooKassa:SecretKey"];
+
+        var authHeader = Convert.ToBase64String(Encoding.UTF8.GetBytes($"{shopId}:{secretKey}"));
+        _httpClient.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Basic", authHeader);
+        _httpClient.DefaultRequestHeaders.Add("Idempotence-Key", Guid.NewGuid().ToString());
+
+        var payload = new
+        {
+            amount = new { value = amount.ToString("0.00", System.Globalization.CultureInfo.InvariantCulture), currency = "RUB" },
+            capture = true,
+            confirmation = new { type = "redirect", return_url = returnUrl },
+            description = description,
+            metadata = new { transaction_id = transactionId.ToString() }
+        };
+
+        var content = new StringContent(JsonConvert.SerializeObject(payload), Encoding.UTF8, "application/json");
+        var response = await _httpClient.PostAsync("https://api.yookassa.ru/v3/payments", content);
+        var responseString = await response.Content.ReadAsStringAsync();
+
+        if (!response.IsSuccessStatusCode)
+            throw new Exception($"YooKassa Error: {responseString}");
+
+        dynamic result = JsonConvert.DeserializeObject(responseString)!;
+        return result.confirmation.confirmation_url;
+    }
+}
+
+// PptSecrets.Core/obj/Debug/net9.0/.NETCoreApp,Version=v9.0.AssemblyAttributes.cs
+// <autogenerated />
+using System;
+using System.Reflection;
+[assembly: global::System.Runtime.Versioning.TargetFrameworkAttribute(".NETCoreApp,Version=v9.0", FrameworkDisplayName = ".NET 9.0")]
+
+
+// PptSecrets.Core/obj/Debug/net9.0/PptSecrets.Core.AssemblyInfo.cs
+//------------------------------------------------------------------------------
+// <auto-generated>
+//     This code was generated by a tool.
+//
+//     Changes to this file may cause incorrect behavior and will be lost if
+//     the code is regenerated.
+// </auto-generated>
+//------------------------------------------------------------------------------
+
+using System;
+using System.Reflection;
+
+[assembly: System.Reflection.AssemblyCompanyAttribute("PptSecrets.Core")]
+[assembly: System.Reflection.AssemblyConfigurationAttribute("Debug")]
+[assembly: System.Reflection.AssemblyFileVersionAttribute("1.0.0.0")]
+[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+3a7685590db4d162e86203f5f7d7190a32a4ff7d")]
+[assembly: System.Reflection.AssemblyProductAttribute("PptSecrets.Core")]
+[assembly: System.Reflection.AssemblyTitleAttribute("PptSecrets.Core")]
+[assembly: System.Reflection.AssemblyVersionAttribute("1.0.0.0")]
+
+// Создано классом WriteCodeFragment MSBuild.
+
+
+
+// PptSecrets.Core/obj/Debug/net9.0/PptSecrets.Core.GlobalUsings.g.cs
+// <auto-generated/>
+global using global::System;
+global using global::System.Collections.Generic;
+global using global::System.IO;
+global using global::System.Linq;
+global using global::System.Net.Http;
+global using global::System.Threading;
+global using global::System.Threading.Tasks;
+
+
+// PptSecrets.DataAccess/PptDbContext.cs
+using PptSecrets.Core.Entities;
+using Microsoft.EntityFrameworkCore;
+
+namespace PptSecrets.DataAccess;
+
+public class PptDbContext : DbContext
+{
+    public PptDbContext(DbContextOptions<PptDbContext> options) : base(options) { }
+
+    public DbSet<User> Users { get; set; }
+    public DbSet<Ppt> Ppts { get; set; }
+    public DbSet<UserPpts> UserPpts { get; set; }
+    public DbSet<EmailVerification> EmailVerifications { get; set; }
+    public DbSet<PaymentTransaction> PaymentTransactions { get; set; }
+
+    protected override void OnModelCreating(ModelBuilder modelBuilder)
+    {
+        base.OnModelCreating(modelBuilder);
+        modelBuilder.ApplyConfigurationsFromAssembly(typeof(PptDbContext).Assembly);
+    }
+}
+
+// PptSecrets.DataAccess/PptSecrets.DataAccess.csproj
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+    <PropertyGroup>
+        <TargetFramework>net9.0</TargetFramework>
+        <ImplicitUsings>enable</ImplicitUsings>
+        <Nullable>enable</Nullable>
+    </PropertyGroup>
+
+    <ItemGroup>
+      <PackageReference Include="MailKit" Version="4.15.0" />
+      <PackageReference Include="Microsoft.AspNetCore.Authentication.JwtBearer" Version="9.0.13" />
+      <PackageReference Include="Microsoft.EntityFrameworkCore" Version="9.0.13" />
+      <PackageReference Include="Microsoft.EntityFrameworkCore.Design" Version="9.0.13">
+        <PrivateAssets>all</PrivateAssets>
+        <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+      </PackageReference>
+      <PackageReference Include="Microsoft.EntityFrameworkCore.Relational" Version="9.0.13" />
+      <PackageReference Include="Microsoft.EntityFrameworkCore.Tools" Version="9.0.13">
+        <PrivateAssets>all</PrivateAssets>
+        <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+      </PackageReference>
+      <PackageReference Include="Microsoft.Extensions.Configuration" Version="9.0.13" />
+      <PackageReference Include="MimeKit" Version="4.15.0" />
+      <PackageReference Include="Newtonsoft.Json" Version="13.0.4" />
+      <PackageReference Include="Npgsql.EntityFrameworkCore.PostgreSQL" Version="9.0.4" />
+    </ItemGroup>
+
+    <ItemGroup>
+      <ProjectReference Include="..\PptSecrets.Core\PptSecrets.Core.csproj" />
+    </ItemGroup>
+
+</Project>
+
+
+// PptSecrets.DataAccess/Repository/EmailVerificationRepository.cs
+using Microsoft.EntityFrameworkCore;
+using PptSecrets.Core.Entities;
+using PptSecrets.Core.Interfaces;
+
+namespace PptSecrets.DataAccess.Repository;
+
+
+public class EmailVerificationRepository : RepositoryBase<EmailVerification>, IEmailVerificationRepository
+{
+    public EmailVerificationRepository(PptDbContext context) : base(context)
+    {
+    }
+
+    public async Task<EmailVerification?> GetLatestByEmailAsync(string email)
+    {
+        return await _dbSet
+            .Where(x => x.Email == email)
+            .OrderByDescending(x => x.CreatedAt)
+            .FirstOrDefaultAsync();
+    }
+}
+
+// PptSecrets.DataAccess/Repository/PaymentTransactionRepository.cs
+using Microsoft.EntityFrameworkCore;
+using PptSecrets.Core.Entities;
+using PptSecrets.Core.Interfaces;
+
+namespace PptSecrets.DataAccess.Repository;
+
+public class PaymentTransactionRepository : RepositoryBase<PaymentTransaction>, IPaymentTransactionRepository
+{
+    public PaymentTransactionRepository(PptDbContext context) : base(context) { }
+
+    public async Task<PaymentTransaction?> GetByPaymentIdAsync(string paymentId)
+    {
+        return await _dbSet.FirstOrDefaultAsync(x => x.YooKassaPaymentId == paymentId);
+    }
+}
+
+// PptSecrets.DataAccess/Repository/PptRepository.cs
+using Microsoft.EntityFrameworkCore;
+using PptSecrets.Core.Entities;
+using PptSecrets.Core.Interfaces;
+
+namespace PptSecrets.DataAccess.Repository;
+
+public class PptRepository : RepositoryBase<Ppt>, IPptRepository
+{
+    public PptRepository(PptDbContext context) : base(context)
+    {
+    }
+}
+
+// PptSecrets.DataAccess/Repository/RepositoryBase.cs
+using PptSecrets.Core.Interfaces;
+using Microsoft.EntityFrameworkCore;
+
+namespace PptSecrets.DataAccess.Repository;
+
+public class RepositoryBase<T> : IRepositoryBase<T> where T : class
+{
+    protected readonly PptDbContext _context;
+    protected readonly DbSet<T> _dbSet;
+
+    public RepositoryBase(PptDbContext context)
+    {
+        _context = context;
+        _dbSet = _context.Set<T>();
+    }
+
+    public virtual async Task<IEnumerable<T>> GetAllAsync() => await _dbSet.ToListAsync();
+    public virtual async Task<T?> GetByIdAsync(Guid id) => await _dbSet.FindAsync(id);
+    public virtual async Task AddAsync(T entity) => await _dbSet.AddAsync(entity);
+    public virtual void Remove(T entity) => _dbSet.Remove(entity);
+    public virtual void Update(T entity) => _dbSet.Update(entity);
+}
+
+// PptSecrets.DataAccess/Repository/UnitOfWork.cs
+using PptSecrets.Core.Interfaces;
+
+namespace PptSecrets.DataAccess.Repository;
+
+public class UnitOfWork : IUnitOfWork
+{
+    private readonly PptDbContext _context;
+    
+
+    public UnitOfWork(PptDbContext context)
+    {
+        _context = context;
+        Users = new UserRepository(_context);
+        Ppts = new PptRepository(_context);
+        UserPpts = new UserPptsRepository(_context);
+        EmailVerifications = new EmailVerificationRepository(_context);
+        PaymentTransactions = new PaymentTransactionRepository(_context);
+    }
+
+    public IUserRepository Users { get; }
+    public IPptRepository Ppts { get; }
+    public IUserPptsRepository UserPpts { get; }
+    public IEmailVerificationRepository EmailVerifications { get; }
+    public IPaymentTransactionRepository PaymentTransactions { get; }
+
+    public async Task<int> SaveChangesAsync()
+        => await _context.SaveChangesAsync();
+
+    public void Dispose()
+        => _context.Dispose();
+}
+
+
+// PptSecrets.DataAccess/Repository/UserPptsRepository.cs
+using Microsoft.EntityFrameworkCore;
+using PptSecrets.Core.Entities;
+using PptSecrets.Core.Interfaces;
+
+namespace PptSecrets.DataAccess.Repository;
+
+public class UserPptsRepository : RepositoryBase<UserPpts>, IUserPptsRepository
+{
+    public UserPptsRepository(PptDbContext context) : base(context)
+    {
+    }
+
+    public async Task<bool> findByUserPptId(Guid userId, Guid pptId)
+    {
+        return (await _context.UserPpts.FirstOrDefaultAsync(up => up.User == userId && up.Ppt == pptId)) != null;
+    }
+}
+
+// PptSecrets.DataAccess/Repository/UserRepository.cs
+using PptSecrets.Core.Interfaces;
+using Microsoft.EntityFrameworkCore;
+using PptSecrets.Core.Entities;
+
+namespace PptSecrets.DataAccess.Repository;
+
+public class UserRepository : RepositoryBase<User>, IUserRepository
+{
+    public UserRepository(PptDbContext context) : base(context) { }
+
+    public async Task<User?> GetByEmailAsync(string email)
+    {
+        return await _dbSet.FirstOrDefaultAsync(u => u.Email == email);
+    }
+}
+
+// PptSecrets.DataAccess/obj/Debug/net9.0/.NETCoreApp,Version=v9.0.AssemblyAttributes.cs
+// <autogenerated />
+using System;
+using System.Reflection;
+[assembly: global::System.Runtime.Versioning.TargetFrameworkAttribute(".NETCoreApp,Version=v9.0", FrameworkDisplayName = ".NET 9.0")]
+
+
+// PptSecrets.DataAccess/obj/Debug/net9.0/PptSecrets.DataAccess.AssemblyInfo.cs
+//------------------------------------------------------------------------------
+// <auto-generated>
+//     This code was generated by a tool.
+//
+//     Changes to this file may cause incorrect behavior and will be lost if
+//     the code is regenerated.
+// </auto-generated>
+//------------------------------------------------------------------------------
+
+using System;
+using System.Reflection;
+
+[assembly: System.Reflection.AssemblyCompanyAttribute("PptSecrets.DataAccess")]
+[assembly: System.Reflection.AssemblyConfigurationAttribute("Debug")]
+[assembly: System.Reflection.AssemblyFileVersionAttribute("1.0.0.0")]
+[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+3a7685590db4d162e86203f5f7d7190a32a4ff7d")]
+[assembly: System.Reflection.AssemblyProductAttribute("PptSecrets.DataAccess")]
+[assembly: System.Reflection.AssemblyTitleAttribute("PptSecrets.DataAccess")]
+[assembly: System.Reflection.AssemblyVersionAttribute("1.0.0.0")]
+
+// Создано классом WriteCodeFragment MSBuild.
+
+
+
+// PptSecrets.DataAccess/obj/Debug/net9.0/PptSecrets.DataAccess.GlobalUsings.g.cs
+// <auto-generated/>
+global using global::System;
+global using global::System.Collections.Generic;
+global using global::System.IO;
+global using global::System.Linq;
+global using global::System.Net.Http;
+global using global::System.Threading;
+global using global::System.Threading.Tasks;
+
+
+// PptSecrets.sln
+﻿
+Microsoft Visual Studio Solution File, Format Version 12.00
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "PptSecrets", "PptSecrets\PptSecrets.csproj", "{C31DECA5-089D-4EAE-9F9E-DEC338CD63CC}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "PptSecrets.DataAccess", "PptSecrets.DataAccess\PptSecrets.DataAccess.csproj", "{24C1BBE7-9C85-41B4-B5C2-023F7EA651D9}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "PptSecrets.Core", "PptSecrets.Core\PptSecrets.Core.csproj", "{666EC68C-C6B7-425A-A24E-13AE64EBFB3B}"
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|Any CPU = Debug|Any CPU
+		Release|Any CPU = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{C31DECA5-089D-4EAE-9F9E-DEC338CD63CC}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{C31DECA5-089D-4EAE-9F9E-DEC338CD63CC}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{C31DECA5-089D-4EAE-9F9E-DEC338CD63CC}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{C31DECA5-089D-4EAE-9F9E-DEC338CD63CC}.Release|Any CPU.Build.0 = Release|Any CPU
+		{24C1BBE7-9C85-41B4-B5C2-023F7EA651D9}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{24C1BBE7-9C85-41B4-B5C2-023F7EA651D9}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{24C1BBE7-9C85-41B4-B5C2-023F7EA651D9}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{24C1BBE7-9C85-41B4-B5C2-023F7EA651D9}.Release|Any CPU.Build.0 = Release|Any CPU
+		{666EC68C-C6B7-425A-A24E-13AE64EBFB3B}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{666EC68C-C6B7-425A-A24E-13AE64EBFB3B}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{666EC68C-C6B7-425A-A24E-13AE64EBFB3B}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{666EC68C-C6B7-425A-A24E-13AE64EBFB3B}.Release|Any CPU.Build.0 = Release|Any CPU
+	EndGlobalSection
+EndGlobal
+

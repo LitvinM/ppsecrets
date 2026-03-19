@@ -24,6 +24,8 @@ public class UserService : IUserService
     }
 
     public async Task<User?> GetByIdAsync(Guid id) => await _uow.Users.GetByIdAsync(id);
+    
+    public async Task<IEnumerable<User>> GetAll() => await _uow.Users.GetAllAsync();
 
     public async Task<User?> GetByEmailAsync(string email) => await _uow.Users.GetByEmailAsync(email);
 

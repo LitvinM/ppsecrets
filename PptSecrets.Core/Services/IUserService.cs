@@ -8,6 +8,7 @@ public interface IUserService
     Task<User?> GetByIdAsync(Guid id);
     Task<User?> GetByEmailAsync(string email);
 
+    Task<IEnumerable<User>> GetAll();
     Task<bool> findPermission(string userEmail, Guid pptId);
     
     Task RegisterAsync(string email, Language lang);
