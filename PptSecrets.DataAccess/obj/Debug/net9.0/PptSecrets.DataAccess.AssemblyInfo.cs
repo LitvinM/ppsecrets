@@ -13,7 +13,7 @@ using System.Reflection;
 [assembly: System.Reflection.AssemblyCompanyAttribute("PptSecrets.DataAccess")]
 [assembly: System.Reflection.AssemblyConfigurationAttribute("Debug")]
 [assembly: System.Reflection.AssemblyFileVersionAttribute("1.0.0.0")]
-[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+35c5685dada6909629dca397120eead1c0bbf300")]
+[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+1325fcd61e8a9d0d80421048771c6a4506daed59")]
 [assembly: System.Reflection.AssemblyProductAttribute("PptSecrets.DataAccess")]
 [assembly: System.Reflection.AssemblyTitleAttribute("PptSecrets.DataAccess")]
 [assembly: System.Reflection.AssemblyVersionAttribute("1.0.0.0")]

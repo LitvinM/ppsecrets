@@ -256,7 +256,7 @@ public class PptService : IPptService
             await client.ConnectAsync(
                 smtpHost, 
                 smtpPort, 
-                SecureSocketOptions.SslOnConnect 
+                SecureSocketOptions.Auto 
             );
             await client.AuthenticateAsync(smtpUser, smtpPass);
         

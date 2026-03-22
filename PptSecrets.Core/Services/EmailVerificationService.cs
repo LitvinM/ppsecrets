@@ -59,7 +59,7 @@ public class EmailVerificationService : IEmailVerificationService
             await client.ConnectAsync(
                 _config["Email:SmtpHost"], 
                 int.Parse(_config["Email:SmtpPort"]!), 
-                SecureSocketOptions.SslOnConnect 
+                SecureSocketOptions.Auto 
             );
             await client.AuthenticateAsync(_config["Email:SmtpUser"], _config["Email:SmtpPass"]);
             await client.SendAsync(message);
